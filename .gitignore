@@ -1,0 +1,7 @@
+_packages/
+.cache/
+Tabs/
+__pycache__/
+eval/data/
+eval/work/
+*.pyc
