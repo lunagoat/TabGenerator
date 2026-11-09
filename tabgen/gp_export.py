@@ -47,6 +47,7 @@ class GPPart:
     strings: tuple[int, ...] | None = None  # open-string pitches, lowest first; None = drums
     program: int = 30
     fret_count: int = 24
+    bm: BeatMap | None = None  # this part's own rhythmic grid (default: the song's)
 
 
 def _gp_duration(ticks: int) -> gp.Duration:
@@ -192,7 +193,7 @@ def write_gp5(path: str, title: str, artist: str, bm: BeatMap, parts: list[GPPar
         if part.strings is not None and channel == 9:
             channel = 10
         track = _make_track(song, n + 1, part, channel)
-        _fill_track(bm, track, part, tempo_marks if n == 0 else {})
+        _fill_track(part.bm or bm, track, part, tempo_marks if n == 0 else {})
         song.tracks.append(track)
         if part.strings is not None:
             channel += 2

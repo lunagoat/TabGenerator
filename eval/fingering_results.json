@@ -1,0 +1,339 @@
+{
+  "baseline": {
+    "overall": 0.7267505294910468,
+    "00": 0.8902707211647835,
+    "comp": 0.7860622284635976,
+    "BN": 0.6346299707443926,
+    "solo": 0.5653731343283582,
+    "Funk": 0.7582833476149672,
+    "Jazz": 0.6403140798106917,
+    "Rock": 0.7813739688936465,
+    "SS": 0.7515273485229641,
+    "01": 0.6131983302247092,
+    "02": 0.6753758424053914,
+    "03": 0.7965465465465466,
+    "04": 0.6869241325230347,
+    "05": 0.6547605374985643
+  },
+  "final_weights": {
+    "span": 0.3,
+    "span_hard": 5,
+    "stretch": 1.0,
+    "height": 0.02,
+    "open_bonus": 0.0,
+    "open_high_mix": 0.0,
+    "string_gap": 1.2,
+    "move": 1.5,
+    "shift": 0.0,
+    "ease_time": 0.35,
+    "string_jump": 0.36,
+    "ringing_clash": 3.0,
+    "top_k": 16,
+    "run_move": 2.0,
+    "rest_ease": 0.5
+  },
+  "final": {
+    "overall": 0.747865990629613,
+    "00": 0.8941381663759763,
+    "comp": 0.7900118488611928,
+    "BN": 0.671470365153321,
+    "solo": 0.6331940298507462,
+    "Funk": 0.7751356755212796,
+    "Jazz": 0.6753791545659891,
+    "Rock": 0.7917637428373528,
+    "SS": 0.7694242794508733,
+    "01": 0.6976640909494627,
+    "02": 0.6817003628823225,
+    "03": 0.7864650364650365,
+    "04": 0.7085865516565379,
+    "05": 0.6692316526932354
+  },
+  "cv_method": "Fixed grid of 108 configurations. For each held-out player, maximize note-weighted training accuracy on the other five, requiring their aggregate comp and Rock accuracy >= baseline. Pool held-out note counts. No player or genre metadata enters assign_frets.",
+  "configurations": 108,
+  "total_notes": 62324,
+  "cross_validated": {
+    "overall": 0.730633463834157,
+    "00": 0.8941381663759763,
+    "comp": 0.7845920919822706,
+    "BN": 0.6721204897605374,
+    "solo": 0.583820895522388,
+    "Funk": 0.7337903456155385,
+    "Jazz": 0.6581693019253523,
+    "Rock": 0.7857187834519237,
+    "SS": 0.7518148494214044,
+    "01": 0.6387778665956124,
+    "02": 0.6688439606013479,
+    "03": 0.7653367653367653,
+    "04": 0.6997647520094099,
+    "05": 0.6692316526932354
+  },
+  "folds": {
+    "00": {
+      "weights": {
+        "span": 0.3,
+        "span_hard": 5,
+        "stretch": 1.0,
+        "height": 0.02,
+        "open_bonus": 0.0,
+        "open_high_mix": 0.0,
+        "string_gap": 1.2,
+        "move": 1.5,
+        "shift": 0.0,
+        "ease_time": 0.35,
+        "string_jump": 0.36,
+        "ringing_clash": 3.0,
+        "top_k": 16,
+        "run_move": 2.0,
+        "rest_ease": 0.5
+      },
+      "scores": {
+        "overall": 0.8941381663759763,
+        "00": 0.8941381663759763,
+        "comp": 0.9274041794592454,
+        "BN": 0.8658227848101265,
+        "solo": 0.7854368932038835,
+        "Funk": 0.8908977556109726,
+        "Jazz": 0.8729438457175269,
+        "Rock": 0.9426710097719869,
+        "SS": 0.8296405711472181
+      }
+    },
+    "01": {
+      "weights": {
+        "span": 0.3,
+        "span_hard": 5,
+        "stretch": 1.0,
+        "height": 0.02,
+        "open_bonus": 0.0,
+        "open_high_mix": 0.0,
+        "string_gap": 1.2,
+        "move": 1.5,
+        "shift": 0.0,
+        "ease_time": 0.35,
+        "string_jump": 0.36,
+        "ringing_clash": 3.0,
+        "top_k": 16,
+        "run_move": 0.0,
+        "rest_ease": 1.0
+      },
+      "scores": {
+        "overall": 0.6387778665956124,
+        "01": 0.6387778665956124,
+        "comp": 0.6908179848320694,
+        "BN": 0.6756756756756757,
+        "solo": 0.5396129032258065,
+        "Funk": 0.6183916604616531,
+        "Jazz": 0.5373417721518987,
+        "Rock": 0.690863579474343,
+        "SS": 0.648921832884097
+      }
+    },
+    "02": {
+      "weights": {
+        "span": 0.3,
+        "span_hard": 5,
+        "stretch": 1.0,
+        "height": 0.02,
+        "open_bonus": 0.0,
+        "open_high_mix": 0.0,
+        "string_gap": 1.2,
+        "move": 1.5,
+        "shift": 0.0,
+        "ease_time": 0.35,
+        "string_jump": 0.15,
+        "ringing_clash": 3.0,
+        "top_k": 16,
+        "run_move": 1.0,
+        "rest_ease": 1.0
+      },
+      "scores": {
+        "overall": 0.6688439606013479,
+        "02": 0.6688439606013479,
+        "comp": 0.7824937378235458,
+        "BN": 0.6514546491728466,
+        "solo": 0.33672224481496543,
+        "Funk": 0.5578193832599119,
+        "Jazz": 0.7438307873090482,
+        "Rock": 0.7443074003795066,
+        "SS": 0.644748455428067
+      }
+    },
+    "03": {
+      "weights": {
+        "span": 0.3,
+        "span_hard": 5,
+        "stretch": 1.0,
+        "height": 0.02,
+        "open_bonus": 0.0,
+        "open_high_mix": 0.0,
+        "string_gap": 1.2,
+        "move": 1.5,
+        "shift": 0.0,
+        "ease_time": 0.35,
+        "string_jump": 0.6,
+        "ringing_clash": 3.0,
+        "top_k": 16,
+        "run_move": 2.0,
+        "rest_ease": 1.0
+      },
+      "scores": {
+        "overall": 0.7653367653367653,
+        "03": 0.7653367653367653,
+        "comp": 0.8087797619047619,
+        "BN": 0.6267100977198697,
+        "solo": 0.6532258064516129,
+        "Funk": 0.6694953104064314,
+        "Jazz": 0.6426566884939195,
+        "Rock": 0.8912931478619268,
+        "SS": 0.8889763779527559
+      }
+    },
+    "04": {
+      "weights": {
+        "span": 0.3,
+        "span_hard": 5,
+        "stretch": 1.0,
+        "height": 0.02,
+        "open_bonus": 0.0,
+        "open_high_mix": 0.0,
+        "string_gap": 1.2,
+        "move": 1.5,
+        "shift": 0.0,
+        "ease_time": 0.35,
+        "string_jump": 0.6,
+        "ringing_clash": 3.0,
+        "top_k": 16,
+        "run_move": 1.0,
+        "rest_ease": 1.0
+      },
+      "scores": {
+        "overall": 0.6997647520094099,
+        "04": 0.6997647520094099,
+        "comp": 0.7302064280114973,
+        "BN": 0.6610526315789473,
+        "solo": 0.6083202511773941,
+        "Funk": 0.7862657456318569,
+        "Jazz": 0.508724832214765,
+        "Rock": 0.7144093466032021,
+        "SS": 0.736779324055666
+      }
+    },
+    "05": {
+      "weights": {
+        "span": 0.3,
+        "span_hard": 5,
+        "stretch": 1.0,
+        "height": 0.02,
+        "open_bonus": 0.0,
+        "open_high_mix": 0.0,
+        "string_gap": 1.2,
+        "move": 1.5,
+        "shift": 0.0,
+        "ease_time": 0.35,
+        "string_jump": 0.36,
+        "ringing_clash": 3.0,
+        "top_k": 16,
+        "run_move": 2.0,
+        "rest_ease": 0.5
+      },
+      "scores": {
+        "overall": 0.6692316526932354,
+        "05": 0.6692316526932354,
+        "comp": 0.711005663554263,
+        "BN": 0.5267584097859327,
+        "solo": 0.5436982520699172,
+        "Funk": 0.821831869510665,
+        "Jazz": 0.6024808033077378,
+        "Rock": 0.6077808654227869,
+        "SS": 0.8016321406151915
+      }
+    }
+  },
+  "runtime": {
+    "most_events": {
+      "file": "01_SS3-98-C_comp",
+      "events": 286,
+      "notes": 502,
+      "median_seconds": 0.012508561994764023
+    },
+    "most_notes": {
+      "file": "00_Rock2-85-F_comp",
+      "events": 257,
+      "notes": 816,
+      "median_seconds": 0.009393635002197698
+    },
+    "3000_events_seconds": 0.13426462600182276
+  },
+  "ablations": {
+    "{'run_move': 0.0}": {
+      "overall": 0.7344682626275592,
+      "00": 0.8871615985440207,
+      "comp": 0.791833062711195,
+      "BN": 0.6573843319969661,
+      "solo": 0.5783880597014925,
+      "Funk": 0.7593544701513854,
+      "Jazz": 0.6496719371840378,
+      "Rock": 0.7854669101441974,
+      "SS": 0.7590023718824122,
+      "01": 0.6385114130917489,
+      "02": 0.6856402280974598,
+      "03": 0.7984770484770485,
+      "04": 0.6877082924916683,
+      "05": 0.6676237510049385
+    },
+    "{'rest_ease': 0.0}": {
+      "overall": 0.7399717604775047,
+      "00": 0.8914082050504285,
+      "comp": 0.784745688331066,
+      "BN": 0.6574926860981688,
+      "solo": 0.6181492537313433,
+      "Funk": 0.7762067980576978,
+      "Jazz": 0.670646445089814,
+      "Rock": 0.7825073987784145,
+      "SS": 0.7559836124487889,
+      "01": 0.6724398259170441,
+      "02": 0.6744427164333852,
+      "03": 0.7790647790647791,
+      "04": 0.7076063516957459,
+      "05": 0.6665900999196049
+    },
+    "{'span': 0.0}": {
+      "overall": 0.7469995507348693,
+      "00": 0.8933040115265034,
+      "comp": 0.7888269627419142,
+      "BN": 0.6675696175100228,
+      "solo": 0.6331940298507462,
+      "Funk": 0.7744215938303342,
+      "Jazz": 0.6753791545659891,
+      "Rock": 0.7915118695296266,
+      "SS": 0.769136778552433,
+      "01": 0.6976640909494627,
+      "02": 0.6778641783307413,
+      "03": 0.7862505362505362,
+      "04": 0.7084885316604588,
+      "05": 0.6688871023314574
+    },
+    "{'top_k': 32}": {
+      "overall": 0.747865990629613,
+      "00": 0.8941381663759763,
+      "comp": 0.7900118488611928,
+      "BN": 0.671470365153321,
+      "solo": 0.6331940298507462,
+      "Funk": 0.7751356755212796,
+      "Jazz": 0.6753791545659891,
+      "Rock": 0.7917637428373528,
+      "SS": 0.7694242794508733,
+      "01": 0.6976640909494627,
+      "02": 0.6817003628823225,
+      "03": 0.7864650364650365,
+      "04": 0.7085865516565379,
+      "05": 0.6692316526932354
+    }
+  },
+  "analysis": [
+    "Baseline errors are predominantly one string above the player, e.g. true frets 8, 6, 7 predicted as 3, 1, 2. Several solo phrases choose the wrong position throughout.",
+    "The final low-position prior remains height=0.02; open-string cost and candidate count are unchanged.",
+    "Larger top_k=32/64 gave identical accuracy; top_k=8 hurt. Interval-dependent crossing, open-string penalties at high positions, and fixed per-shift penalties did not consistently help. Global movement increases helped solos but hurt comp. Rearticulation clash exemption did not help.",
+    "The held-out gain is smaller than the all-data gain, with regressions for players 02 and 03 under fold-specific weights. Held-out comp is 0.784592 vs baseline 0.786062; deployed default comp is 0.790012."
+  ]
+}

@@ -83,3 +83,49 @@ def lowest_only(notes: list[TNote], window: float = 0.03) -> list[TNote]:
             continue
         out.append(n)
     return out
+
+
+def merge(
+    transcriptions: list[list[TNote]],
+    min_votes: float,
+    weights: list[float] | None = None,
+    tol: float = TOLERANCE,
+) -> list[TNote]:
+    """Like `vote`, but the kept note is the consensus of the copies that
+    agree instead of the first copy: its start and end are the medians over
+    the transcriptions that found it, so one late or early copy doesn't set
+    the timing. `weights` lets some transcriptions count for more.
+
+    Each kept note's `conf` is the share of the vote it received (0..1).
+    """
+    weights = weights or [1.0] * len(transcriptions)
+    by_key: dict = {}
+    for ti, notes in enumerate(transcriptions):
+        for n in notes:
+            by_key.setdefault(_key(n), []).append((n.onset, ti, n))
+    total = sum(weights)
+    out: list[TNote] = []
+    for items in by_key.values():
+        items.sort(key=lambda x: x[0])
+        i = 0
+        while i < len(items):
+            # A cluster: copies of one note, each transcription at most once,
+            # all within `tol` of the first.
+            start = items[i][0]
+            seen: dict[int, TNote] = {}
+            j = i
+            while j < len(items) and items[j][0] - start <= tol and items[j][1] not in seen:
+                seen[items[j][1]] = items[j][2]
+                j += 1
+            score = sum(weights[t] for t in seen)
+            if score >= min_votes:
+                copies = list(seen.values())
+                onsets = sorted(c.onset for c in copies)
+                ends = sorted(c.offset for c in copies)
+                first = seen[min(seen)]  # earliest-listed transcription names the instrument
+                on = onsets[len(onsets) // 2] if len(onsets) % 2 else 0.5 * (onsets[len(onsets) // 2 - 1] + onsets[len(onsets) // 2])
+                off = ends[len(ends) // 2]
+                out.append(TNote(on, max(off, on + 0.01), first.pitch, first.instrument, first.is_drum, score / total))
+            i = j
+    out.sort(key=lambda n: (n.onset, n.pitch))
+    return out

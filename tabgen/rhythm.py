@@ -18,19 +18,17 @@ SIMPLE_SUBDIVISIONS = {1: 0.0, 2: 0.3, 4: 0.8, 8: 3.5, 3: 2.0, 6: 4.0}
 # Compound time (6/8, 12/8): the beat is a dotted quarter split in three.
 COMPOUND_SUBDIVISIONS = {1: 0.0, 3: 0.3, 6: 0.9, 12: 4.0, 2: 3.0}
 ONSET_SIGMA_S = 0.025  # typical timing error of a transcribed onset
+FAMILY_SWITCH = 3.0  # cost of going from straight to triplet subdivisions or back
 CLUSTER_S = 0.035  # onsets closer than this are one rhythmic event (strums, flams)
 
 
 def track_beats(mono: np.ndarray, sr: int, device: str) -> tuple[np.ndarray, np.ndarray]:
-    """Beat and downbeat times (seconds) of the full mix."""
-    from beat_this.inference import Audio2Beats
+    """Beat times (seconds) of the full mix, and the indexes of the beats
+    that start a bar. See beats.py."""
+    from . import beats
 
-    # "final0" rather than "small0": the small model emits spurious beats
-    # before the first downbeat (per MuScriptor's notes).
-    tracker = Audio2Beats(checkpoint_path="final0", device=device, dbn=False)
-    # Returns (beats, downbeats) despite beat_this's own naming.
-    beats, downbeats = tracker(mono.astype(np.float32), sr)
-    return np.asarray(beats, dtype=float), np.asarray(downbeats, dtype=float)
+    times, bar_starts = beats.track(mono, sr, device)
+    return np.asarray(times, dtype=float), np.asarray(bar_starts, dtype=int)
 
 
 @dataclass
@@ -121,59 +119,46 @@ def smooth_beats(beats: np.ndarray, half_window: int = 4) -> np.ndarray:
 
 def build_beatmap(
     beats: np.ndarray,
-    downbeats: np.ndarray,
+    bar_starts: np.ndarray,
     duration: float,
     compound: bool = False,
 ) -> BeatMap:
-    beats = smooth_beats(np.unique(np.round(beats, 4)))
-    full, _ = _fill_edges(beats, duration)
-    down_idx = sorted({int(np.argmin(np.abs(full - d))) for d in downbeats})
-    meter = _dominant_meter(down_idx)
-    # Pad beats before the song so the first downbeat starts a bar and the
-    # pickup bar is a full bar with leading rests.
-    first_down = down_idx[0] if down_idx else 0
-    pad = (-first_down) % meter
+    """`bar_starts` are indexes into `beats` of the beats that start a bar."""
+    n_tracked = len(beats)
+    beats = smooth_beats(np.asarray(beats, dtype=float))
+    full, head = _fill_edges(beats, duration)
+    starts = sorted({int(i) + head for i in bar_starts if 0 <= int(i) < n_tracked})
+    meter = _dominant_meter(starts)
+    # Pad beats before the song so the first bar line starts a bar and the
+    # pickup is a full bar with leading rests.
+    first = starts[0] if starts else 0
+    pad = (-first) % meter
     if pad:
         period = full[1] - full[0]
         full = np.concatenate([full[0] - period * np.arange(pad, 0, -1), full])
-        down_idx = [d + pad for d in down_idx]
-    bars = _lay_bars(down_idx, meter, len(full))
+        starts = [d + pad for d in starts]
+        first += pad
+    bars = [Bar(b, meter) for b in range(0, first, meter)]
+    bars += [Bar(a, c - a) for a, c in zip(starts, starts[1:])]
+    # After the last tracked bar line: the meter that was in force there.
+    tail_meter = bars[-1].n_beats if len(starts) > 1 else meter
+    b = starts[-1] if starts else 0
+    while b < len(full) - 1:
+        bars.append(Bar(b, tail_meter))
+        b += tail_meter
+    # Make the beats cover the last bar completely.
+    extra = b + 1 - len(full)
+    if extra > 0:
+        period = full[-1] - full[-2]
+        full = np.concatenate([full, full[-1] + period * np.arange(1, extra + 1)])
     return BeatMap(beats=full, bars=bars, compound=compound)
 
 
-def _dominant_meter(down_idx: list[int]) -> int:
-    if len(down_idx) < 2:
+def _dominant_meter(starts: list[int]) -> int:
+    if len(starts) < 2:
         return 4
-    gaps = np.diff(down_idx)
-    gaps = gaps[(gaps >= 2) & (gaps <= 12)]
-    if not len(gaps):
-        return 4
-    vals, counts = np.unique(gaps, return_counts=True)
+    vals, counts = np.unique(np.diff(starts), return_counts=True)
     return int(vals[counts.argmax()])
-
-
-def _lay_bars(down_idx: list[int], meter: int, n_beats: int) -> list[Bar]:
-    """Bars of `meter` beats from beat 0, re-anchored when the tracked
-    downbeats consistently say the bar line moved (an odd bar, a dropped
-    beat...). A lone stray downbeat is ignored."""
-    downs = set(down_idx)
-    bars: list[Bar] = []
-    b = 0
-    while b < n_beats - 1:
-        nxt = b + meter
-        if b >= (down_idx[0] if down_idx else 0) and nxt not in downs:
-            best = None
-            for j in range(b + 2, b + 2 * meter):
-                if j == nxt or j not in downs:
-                    continue
-                support = sum((j + k * meter) in downs for k in range(1, 4))
-                if support >= 3 and (best is None or abs(j - nxt) < abs(best - nxt)):
-                    best = j
-            if best is not None:
-                nxt = best
-        bars.append(Bar(b, nxt - b))
-        b = nxt
-    return bars
 
 
 # ----------------------------------------------------------------------------
@@ -207,8 +192,14 @@ def _cluster(times: np.ndarray) -> np.ndarray:
     return np.array([min(c) for c in out])
 
 
-def choose_subdivisions(bm: BeatMap, onsets: np.ndarray) -> np.ndarray:
-    """Pick a subdivision per beat that best explains the onsets in it."""
+SHUFFLE_BIAS = {3: -1.9, 6: -2.5, 4: 1.0, 8: 1.0}
+
+
+def choose_subdivisions(bm: BeatMap, onsets: np.ndarray, shuffle: bool | None = None) -> np.ndarray:
+    """Pick a subdivision per beat that best explains the onsets in it.
+
+    `shuffle`: whether triplets are the song's everyday grid (see
+    `is_shuffle`); None decides from these onsets alone."""
     table = COMPOUND_SUBDIVISIONS if bm.compound else SIMPLE_SUBDIVISIONS
     n = len(bm.beats) - 1
     events = _cluster(np.asarray(onsets, dtype=float))
@@ -221,38 +212,72 @@ def choose_subdivisions(bm: BeatMap, onsets: np.ndarray) -> np.ndarray:
         if 0 <= i < n:
             per_beat[i].append(frac)
 
-    def best_for(fracs, beat_len_i, bias):
+    subs = list(table)
+    triplet = np.array([(s in (3, 6)) and not bm.compound for s in subs])
+
+    def costs_for(fracs, beat_len_i, bias):
+        """Cost of each subdivision for one beat (lower is better)."""
+        out = np.zeros(len(subs))
         if not fracs:
-            return 1
+            return out
         f = np.array(fracs)
-        best = None
-        for s, cost_s in table.items():
+        for j, s in enumerate(subs):
             grid = np.round(f * s) / s
             err = (f - grid) * beat_len_i
-            cost = float(np.sum((err / ONSET_SIGMA_S) ** 2)) + cost_s + bias.get(s, 0.0)
+            cost = float(np.sum((err / ONSET_SIGMA_S) ** 2)) + table[s] + bias.get(s, 0.0)
             # Two separate onsets on one grid point merge into one: penalise.
             slots = np.round(f * s).astype(int)
             cost += 6.0 * (len(slots) - len(set(slots.tolist())))
-            if best is None or cost < best[0]:
-                best = (cost, s)
-        return best[1]
+            out[j] = cost
+        return out
 
-    chosen = np.ones(n, dtype=int)
-    bias: dict[int, float] = {}
-    for rnd in range(2):
-        for i in range(n):
-            chosen[i] = best_for(per_beat[i], beat_len[i], bias)
-        if rnd == 0 and not bm.compound:
-            # If most busy beats are triplet-based (shuffle), triplets become
-            # the everyday grid and straight 16ths need the evidence instead.
-            busy = [chosen[i] for i in range(n) if len(per_beat[i]) >= 2]
-            if busy:
-                trip = sum(1 for s in busy if s in (3, 6)) / len(busy)
-                if trip > 0.5:
-                    bias = {3: -1.9, 6: -2.5, 4: 1.0, 8: 1.0}
-                else:
-                    break
-    return chosen
+    def decode(bias):
+        """Best subdivision per beat. Straight and triplet beats rarely
+        alternate, so changing between the two families costs extra: a
+        lone triplet beat in a straight passage needs clear evidence."""
+        cost = np.array([costs_for(per_beat[i], beat_len[i], bias) for i in range(n)])
+        if not n:
+            return np.ones(0, dtype=int)
+        switch = FAMILY_SWITCH * (triplet[:, None] != triplet[None, :])
+        # Beats without onsets carry the family along at no cost.
+        empty = np.array([not per_beat[i] for i in range(n)])
+        score = cost[0].copy()
+        back = np.zeros((n, len(subs)), dtype=int)
+        for i in range(1, n):
+            tot = score[:, None] + switch
+            back[i] = tot.argmin(axis=0)
+            score = tot.min(axis=0) + cost[i]
+        j = int(score.argmin())
+        path = [j]
+        for i in range(n - 1, 0, -1):
+            j = int(back[i][j])
+            path.append(j)
+        path = path[::-1]
+        return np.array([1 if empty[i] else subs[path[i]] for i in range(n)], dtype=int)
+
+    if shuffle is None:
+        chosen = decode({})
+        shuffle = not bm.compound and _mostly_triplets(chosen, per_beat)
+        if not shuffle:
+            return chosen
+    return decode(SHUFFLE_BIAS if shuffle and not bm.compound else {})
+
+
+def _mostly_triplets(chosen, per_beat) -> bool:
+    busy = [chosen[i] for i in range(len(chosen)) if len(per_beat[i]) >= 2]
+    return bool(busy) and sum(1 for s in busy if s in (3, 6)) / len(busy) > 0.5
+
+
+def is_shuffle(bm: BeatMap, onsets: np.ndarray) -> bool:
+    """Whether most busy beats are triplet-based (shuffle, swing): triplets
+    are then the everyday grid and straight 16ths need the evidence."""
+    if bm.compound:
+        return False
+    chosen = choose_subdivisions(bm, onsets, shuffle=False)
+    pos = bm.time_to_beat(_cluster(np.asarray(onsets, dtype=float)))
+    counts = np.bincount(np.floor(pos).astype(int).clip(0, len(chosen) - 1), minlength=len(chosen))
+    busy = chosen[counts >= 2]
+    return len(busy) > 0 and float(np.mean(np.isin(busy, (3, 6)))) > 0.5
 
 
 def detect_compound(bm: BeatMap, onsets: np.ndarray) -> bool:

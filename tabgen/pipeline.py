@@ -6,7 +6,7 @@ from glob import escape as glob_escape
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +15,7 @@ from . import fretboard, gp_export, rhythm, separate, tab_text
 from .transcribe import BASSES, DRUMS, GUITARS, SAMPLE_RATE, TNote
 
 ROOT = Path(__file__).resolve().parents[1]
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 # Transcription passes: which audio the model hears, and which instruments
 # it may output (None = any; notes of other instruments are then discarded,
@@ -85,6 +85,9 @@ class Options:
     split_guitars: bool = True
     fast: bool = False
     open_folder: bool = True
+    separator: str = "roformer"  # or "demucs" (htdemucs_6s through StemSplitter)
+    batch: int = 8  # transcription passes decoded together (GPU memory vs speed)
+    full_precision: bool = False  # fp32 on the GPU instead of fp16
 
 
 def _device(opts: Options) -> str:
@@ -133,6 +136,26 @@ def mix_stems(stems: dict[str, Path], names: list[str], sr: int) -> np.ndarray:
     return np.sum([p[:n] for p in parts], axis=0)
 
 
+def _check_cache_owner(cache: Path, input_path: Path):
+    """The cache folder is named after the song file; make sure what is in it
+    was made from this very file (two albums can both have a "01 Intro")."""
+    st = input_path.stat()
+    mark = {"path": str(input_path), "size": st.st_size, "mtime": int(st.st_mtime)}
+    owner = cache / "source.json"
+    if owner.is_file():
+        try:
+            if json.loads(owner.read_text()) == mark:
+                return
+        except ValueError:
+            pass
+        for f in cache.iterdir():
+            if f.is_dir():
+                shutil.rmtree(f)
+            else:
+                f.unlink()
+    owner.write_text(json.dumps(mark))
+
+
 # ----------------------------------------------------------------------------
 
 
@@ -149,6 +172,7 @@ def run(input_path: Path, opts: Options) -> Path:
     steps = 5
 
     print(f"\n[1/{steps}] Decoding {input_path.name}")
+    _check_cache_owner(cache, input_path)
     song_wav = cache / f"{name}.wav"
     if not song_wav.is_file():
         decode(input_path, song_wav)
@@ -156,35 +180,45 @@ def run(input_path: Path, opts: Options) -> Path:
     duration = len(mix16) / SAMPLE_RATE
     print(f"      {duration / 60:.0f}:{duration % 60:04.1f} long")
 
-    print(f"\n[2/{steps}] Splitting stems with StemSplitter (Demucs, {opts.shifts} shifts)")
-    splitter = separate.load_splitter(separate.find_stemsplitter())
     plan = FAST_PARTS if opts.fast else PARTS
     needed = {s for p in opts.parts for ps in plan[p]["passes"] for s in PASSES[ps]["stems"] if s != "mix"}
     stems = {}
-    if needed:
-        with tempfile.TemporaryDirectory() as tmp:
-            # Demucs names its output folder after the input file.
-            link = Path(tmp) / f"{name}.wav"
-            link.symlink_to(song_wav)
-            stems = separate.separate(splitter, link, name, device, opts.shifts, opts.resplit)
+    if opts.separator == "demucs":
+        print(f"\n[2/{steps}] Splitting stems with StemSplitter (Demucs, {opts.shifts} shifts)")
+        splitter = separate.load_splitter(separate.find_stemsplitter())
+        if needed:
+            with tempfile.TemporaryDirectory() as tmp:
+                # Demucs names its output folder after the input file.
+                link = Path(tmp) / f"{name}.wav"
+                link.symlink_to(song_wav)
+                stems = separate.separate(splitter, link, name, device, opts.shifts, opts.resplit)
+    else:
+        print(f"\n[2/{steps}] Splitting stems (BS-RoFormer)")
+        if needed:
+            from . import separate_roformer
+            from .transcribe import print_progress
+
+            stems = separate_roformer.separate(
+                song_wav, cache, device, opts.resplit, print_progress("separating", "chunks")
+            )
 
     print(f"\n[3/{steps}] Finding the beat")
-    beats_file = cache / "beats.json"
+    beats_file = cache / "beats_v2.json"
     if beats_file.is_file():
         b = json.loads(beats_file.read_text())
-        beats, downbeats = np.array(b["beats"]), np.array(b["downbeats"])
+        beats, bar_starts = np.array(b["beats"]), np.array(b["bar_starts"], dtype=int)
     else:
-        beats, downbeats = rhythm.track_beats(load_mono(song_wav, 22050), 22050, device)
-        beats_file.write_text(json.dumps({"beats": beats.tolist(), "downbeats": downbeats.tolist()}))
+        beats, bar_starts = rhythm.track_beats(load_mono(song_wav, 22050), 22050, device)
+        beats_file.write_text(json.dumps({"beats": beats.tolist(), "bar_starts": bar_starts.tolist()}))
     if len(beats) >= 2:
         bpm = 60.0 / float(np.median(np.diff(beats)))
-        print(f"      ~{bpm:.0f} BPM, {len(downbeats)} bars")
+        print(f"      ~{bpm:.0f} BPM, {len(bar_starts)} bars")
 
     print(f"\n[4/{steps}] Transcribing notes (MuScriptor {opts.model_size})")
     notes, guitar_groups = _transcribe_parts(opts, stems, mix16, cache, device)
 
     print(f"\n[5/{steps}] Writing tabs")
-    files = _write_outputs(name, input_path, notes, guitar_groups, beats, downbeats, duration, opts, out_dir)
+    files = _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts, out_dir)
     for f in files:
         print(f"      {f.name}")
     print(f"\nDone! Tabs are in: {out_dir}")
@@ -215,21 +249,31 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
             print("      guitars are mono: no left/center/right split")
     positions_audio = None
 
-    transcriber = None
+    half = device.startswith("cuda") and not opts.full_precision
     results: dict[str, list[TNote]] = {}
-    for i, name in enumerate(pass_names):
+    todo: dict[tuple, list[str]] = {}  # instrument restriction -> passes to run
+    paths = {}
+    for name in pass_names:
         spec = PASSES[name]
         inst = "any" if spec["instruments"] is None else "+".join(spec["instruments"])
         where = f"@{spec['position']}" if "position" in spec else ""
-        key = f"v{CACHE_VERSION}_{'+'.join(spec['stems'])}{where}_{inst}_{opts.model_size}_b{opts.beam_size}"
-        path = cache / f"notes_{key}.json"
-        label = f"pass {i + 1}/{len(pass_names)} ({name})"
-        if path.is_file() and not opts.retranscribe:
-            results[name] = [TNote(**n) for n in json.loads(path.read_text())]
-            print(f"      {label}: reusing earlier transcription")
-            continue
-        if transcriber is None:
-            transcriber = Transcriber(opts.model_size, device, opts.weights)
+        source = "mix" if spec["stems"] == ["mix"] else f"{opts.separator}-{'+'.join(spec['stems'])}"
+        shift = f"_s{spec['shift']}" if spec.get("shift") else ""
+        key = (
+            f"v{CACHE_VERSION}_{source}{where}_{inst}{shift}_{opts.model_size}"
+            f"_b{opts.beam_size}{'_fp16' if half else ''}"
+        )
+        paths[name] = cache / f"notes_{key}.json"
+        if paths[name].is_file() and not opts.retranscribe:
+            results[name] = [TNote(**n) for n in json.loads(paths[name].read_text())]
+        else:
+            todo.setdefault(tuple(spec["instruments"] or ()), []).append(name)
+    if len(results):
+        print(f"      reusing {len(results)} earlier transcription(s)")
+
+    def audio_for(name):
+        nonlocal positions_audio
+        spec = PASSES[name]
         if "position" in spec:
             if positions_audio is None:
                 positions_audio = stereo.split_positions(guitar_stereo[0])
@@ -240,9 +284,46 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
             audio = mix16
         else:
             audio = mix_stems(stems, spec["stems"], SAMPLE_RATE)
-        notes = transcriber.transcribe(audio, spec["instruments"], opts.beam_size, print_progress(label))
-        path.write_text(json.dumps([n.to_json() for n in notes]))
-        results[name] = notes
+        shift = spec.get("shift", 0.0)
+        if shift:
+            # Silence in front moves the model's 5-second chunk boundaries,
+            # so this pass makes its boundary mistakes somewhere else.
+            audio = np.concatenate([np.zeros(int(round(shift * SAMPLE_RATE)), dtype=np.float32), audio])
+        return audio.astype(np.float32)
+
+    if todo:
+        import torch
+
+        transcriber = Transcriber(
+            opts.model_size, device, opts.weights, dtype=torch.float16 if half else torch.float32
+        )
+        batch_size = max(1, opts.batch if opts.beam_size == 1 else 1)
+        batches = [
+            (inst, names[i: i + batch_size])
+            for inst, names in todo.items()
+            for i in range(0, len(names), batch_size)
+        ]
+        n_total = sum(len(names) for _, names in batches)
+        done = 0
+        for inst, names in batches:
+            label = f"passes {done + 1}-{done + len(names)}/{n_total}" if len(names) > 1 else f"pass {done + 1}/{n_total}"
+            audios = [audio_for(n) for n in names]
+            if opts.beam_size > 1:
+                outs = [transcriber.transcribe(audios[0], list(inst) or None, opts.beam_size, print_progress(label))]
+            else:
+                outs = transcriber.transcribe_many(audios, list(inst) or None, print_progress(label))
+            for name, notes in zip(names, outs):
+                shift = PASSES[name].get("shift", 0.0)
+                if shift:
+                    for n in notes:
+                        n.onset -= shift
+                        n.offset -= shift
+                    notes = [n for n in notes if n.onset >= 0]
+                paths[name].write_text(json.dumps([n.to_json() for n in notes]))
+                results[name] = notes
+            done += len(names)
+        del transcriber
+        torch.cuda.empty_cache()
 
     out: dict[str, list[TNote]] = {}
     for part in opts.parts:
@@ -352,6 +433,13 @@ def split_guitar_parts(notes: list[TNote]) -> list[tuple[str, list[TNote]]]:
     return [(PART_TITLES.get(k, k), groups[k]) for k in major]
 
 
+def _part_grid(bm, notes, shuffle):
+    """The beat map with subdivisions chosen for this part's own notes, so a
+    busy guitar doesn't force a fine grid onto a simple drum beat."""
+    onsets = np.array([n.onset for n in notes])
+    return replace(bm, subdivisions=rhythm.choose_subdivisions(bm, onsets, shuffle))
+
+
 def _events(notes, bm):
     """Quantized notes grouped into chords: (ticks, notes per tick, fretboard events)."""
     q = rhythm.quantize(bm, notes, bm.subdivisions)
@@ -407,7 +495,7 @@ def _fretted_part(title, notes, bm, tunings_table_bass: bool, forced_tuning, pro
         "moved": moved,
         "tuning_name": tuning.name,
     }
-    gp_part = gp_export.GPPart(title, gp_events, tuning.strings, program, max_fret)
+    gp_part = gp_export.GPPart(title, gp_events, tuning.strings, program, max_fret, bm=bm)
     return labels, text_events, gp_part, info
 
 
@@ -429,16 +517,17 @@ def _drum_part(notes, bm):
     events = {t: {index[l]: s for l, s in cell.items()} for t, cell in by_tick.items()}
     step = {t: bm.beat_ticks // max(1, int(bm.subdivisions[min(t // bm.beat_ticks, len(bm.subdivisions) - 1)])) for t in gp_by_tick}
     gp_events = [gp_export.GPEvent(t, t + step[t], sorted(p)) for t, p in sorted(gp_by_tick.items())]
-    return lines, events, gp_export.GPPart("Drums", gp_events, None, 0)
+    return lines, events, gp_export.GPPart("Drums", gp_events, None, 0, bm=bm)
 
 
-def _write_outputs(name, input_path, notes, guitar_groups, beats, downbeats, duration, opts, out_dir: Path) -> list[Path]:
+def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts, out_dir: Path) -> list[Path]:
     delay = _correct_onset_delay(notes, beats)
-    bm = rhythm.build_beatmap(beats, downbeats, duration)
+    bm = rhythm.build_beatmap(beats, bar_starts, duration)
     all_onsets = np.array([n.onset for ns in notes.values() for n in ns])
     if rhythm.detect_compound(bm, all_onsets):
         bm.compound = True
-    bm.subdivisions = rhythm.choose_subdivisions(bm, all_onsets)
+    shuffle = rhythm.is_shuffle(bm, all_onsets)
+    bm.subdivisions = rhythm.choose_subdivisions(bm, all_onsets, shuffle)
 
     tempos = [bm.bar_tempo(b) for b in bm.bars]
     tempo = float(np.median(tempos)) if tempos else 120.0
@@ -474,8 +563,9 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, downbeats, dur
                 groups.append((", ".join(x for x in (where, sound) if x), gnotes))
         for gi, (flavour, gnotes) in enumerate(groups):
             title = "Guitar" if len(groups) == 1 else f"Guitar {gi + 1} ({flavour})"
+            part_bm = _part_grid(bm, gnotes, shuffle)
             labels, events, gp_part, info = _fretted_part(
-                title, gnotes, bm, False, guitar_tuning, 30
+                title, gnotes, part_bm, False, guitar_tuning, 30
             )
             gp_parts.append(gp_part)
             header = base_header + [
@@ -489,12 +579,13 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, downbeats, dur
             if info["dropped"]:
                 footer.append(f"({info['dropped']} notes did not fit on the neck and were left out.)")
             path = out_dir / f"{name} - {title}.txt"
-            path.write_text(tab_text.render(header, labels, bm, events, footer))
+            path.write_text(tab_text.render(header, labels, part_bm, events, footer))
             files.append(path)
 
     if "bass" in notes:
+        part_bm = _part_grid(bm, notes["bass"], shuffle)
         labels, events, gp_part, info = _fretted_part(
-            "Bass", notes["bass"], bm, True, opts.bass_tuning, 33, guitar_tuning
+            "Bass", notes["bass"], part_bm, True, opts.bass_tuning, 33, guitar_tuning
         )
         gp_parts.append(gp_part)
         header = base_header + ["Part: Bass", f"Tuning: {info['tuning']}", note_line]
@@ -504,15 +595,16 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, downbeats, dur
         if info["dropped"]:
             footer.append(f"({info['dropped']} notes did not fit on the neck and were left out.)")
         path = out_dir / f"{name} - Bass.txt"
-        path.write_text(tab_text.render(header, labels, bm, events, footer))
+        path.write_text(tab_text.render(header, labels, part_bm, events, footer))
         files.append(path)
 
     if "drums" in notes:
-        labels, events, gp_part = _drum_part(notes["drums"], bm)
+        part_bm = _part_grid(bm, notes["drums"], shuffle)
+        labels, events, gp_part = _drum_part(notes["drums"], part_bm)
         gp_parts.append(gp_part)
         header = base_header + ["Part: Drums", note_line]
         path = out_dir / f"{name} - Drums.txt"
-        path.write_text(tab_text.render(header, labels, bm, events, [""] + tab_text.DRUM_LEGEND))
+        path.write_text(tab_text.render(header, labels, part_bm, events, [""] + tab_text.DRUM_LEGEND))
         files.append(path)
 
     if gp_parts:

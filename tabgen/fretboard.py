@@ -87,13 +87,12 @@ def find_tuning(name: str, bass: bool) -> Tuning:
 class FingeringWeights:
     """Costs used by the fingering optimizer, tuned on GuitarSet."""
 
-    # Accuracy on GuitarSet (string chosen by the real player): 73%, vs
-    # 54.5% for "lowest fret" and 68.9% without hand-position tracking.
-    span: float = 0.0  # per fret of stretch beyond a comfortable 3-fret span
+    # Defaults score 74.8% string accuracy on GuitarSet; the player-held-out
+    # weight search scores 73.1%. See eval/tune_fingering.py for reproduction.
+    span: float = 0.3  # per fret of stretch beyond a comfortable 3-fret span
     span_hard: int = 5  # anything wider is not considered
     stretch: float = 1.0  # note one fret past the 4-fret box under the hand
-    height: float = 0.02  # per fret of hand position (0.01 scores 75% on GuitarSet
-    # but its jazz solos sit high on the neck; rock tabs favour low positions)
+    height: float = 0.02  # per fret of hand position; retain a low-position prior
     open_bonus: float = 0.0  # open strings need no finger
     open_high_mix: float = 0.0  # open string mixed with a fretted note at fret >= 7
     string_gap: float = 1.2  # per unused string inside a 3+ note chord
@@ -103,6 +102,8 @@ class FingeringWeights:
     string_jump: float = 0.36  # per string crossed between single notes
     ringing_clash: float = 3.0  # new note on a string that is still ringing
     top_k: int = 16
+    run_move: float = 2.0  # extra per-fret movement cost between single notes
+    rest_ease: float = 0.5  # blend onset spacing (0) with actual note-off rest (1)
 
 
 @dataclass
@@ -290,12 +291,19 @@ def _popcount(x: np.ndarray) -> np.ndarray:
 def _transition(a: _Layer, b: _Layer, w: FingeringWeights) -> np.ndarray:
     """Cost matrix [states of a, states of b] for moving from a to b."""
     dt = max(0.0, b.time - a.time)
-    # A long gap gives time to move the hand for free-ish.
+    # Time spent holding a note is not all available for shifting. Blend
+    # onset spacing with actual silence; missing note-offs preserve the old
+    # onset-based behavior. A rest still gives the hand time to relocate.
+    rest = max(0.0, b.time - float(a.kept_ends.max())) if len(a.kept_ends) else dt
+    dt = dt * (1.0 - w.rest_ease) + rest * w.rest_ease
     ease = 1.0 / (1.0 + dt / max(w.ease_time, 1e-3))
     dist = np.abs(b.hand[None, :] - a.hand[:, None])
     move = (w.move * dist + w.shift * (dist > 0)) * ease
-    # Single-note lines like to stay near the same string.
+    # Single-note runs favour a stable position box more strongly than
+    # chord changes do. This uses the sounding notes, not an instrument,
+    # tuning, genre or dataset-specific register assumption.
     single = (a.single[:, None] >= 0) & (b.single[None, :] >= 0)
+    move += single * w.run_move * dist * ease
     jump = np.where(single, w.string_jump * np.abs(b.single[None, :] - a.single[:, None]), 0.0)
     ring = a.ringing_mask(b.time)
     clash = _popcount(ring[:, None] & b.mask[None, :])

@@ -11,6 +11,9 @@ import numpy as np
 import torch
 
 SAMPLE_RATE = 16000
+SEGMENT_SECONDS = 5.0  # MuScriptor transcribes in chunks of this length
+TOKEN_BUDGETS = (640, 2000)  # tokens per chunk: usual case, MuScriptor's own limit
+VOCAB_SIZE = 1393
 
 GUITARS = ["acoustic_guitar", "clean_electric_guitar", "distorted_electric_guitar"]
 BASSES = ["electric_bass", "acoustic_bass"]
@@ -24,6 +27,7 @@ class TNote:
     pitch: int
     instrument: str
     is_drum: bool
+    conf: float = 1.0  # probability the model gave this note's pitch token
 
     def to_json(self):
         return asdict(self)
@@ -81,6 +85,7 @@ class Transcriber:
         dtype: torch.dtype = torch.float32,
     ):
         self.quiet = quiet
+        self.longest_chunk = 0
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         with self._maybe_quiet():
@@ -104,8 +109,138 @@ class Transcriber:
     ) -> list[TNote]:
         """Transcribe 16 kHz mono audio. `instruments` hard-limits what the
         model may output (and conditions it on those instruments)."""
+        if beam_size > 1:
+            return self._transcribe_beam(mono16k, instruments, beam_size, progress)
+        return self.transcribe_many([mono16k], instruments, progress)[0]
+
+    def transcribe_many(
+        self,
+        audios: list[np.ndarray],
+        instruments: list[str] | None = None,
+        progress=None,
+    ) -> list[list[TNote]]:
+        """Transcribe several 16 kHz mono signals at once (e.g. different
+        mixes of one song), one result per signal.
+
+        The model writes notes token by token, and a step costs almost the
+        same for a batch as for one signal, so this is several times faster
+        than transcribing them one after another. The outcome is the same as
+        MuScriptor's own greedy decoding with prelude forcing (each signal's
+        5-second chunks are decoded in order, and the notes still sounding at
+        a chunk boundary are forced into the next chunk's opening), plus a
+        confidence per note: the probability the model gave its pitch token.
+        """
+        from muscriptor.events import ChunkBoundary, OpenNoteTracker, _DrumHit, _EndNote, _StartNote
+        from muscriptor.tokenizer.mt3 import instrument_group_from_names
+
+        tm = self.model
+        lm, tok, device = tm._model, tm._tokenizer, tm._device
+        seg = int(SEGMENT_SECONDS * SAMPLE_RATE)
+        n_chunks = max(1, max(int(np.ceil(len(a) / seg)) for a in audios))
+        wavs = []
+        for a in audios:
+            w = np.zeros(n_chunks * seg, dtype=np.float32)
+            w[: len(a)] = a
+            wavs.append(torch.from_numpy(w)[None].to(device))
+        group = instrument_group_from_names(instruments) if instruments else None
+        forbidden = None
+        if instruments:
+            forbidden = torch.tensor(tok.forbidden_token_ids(instruments), device=device, dtype=torch.long)
+        K = len(audios)
+        eos, ungen = tok.eos_id, lm.ungenerated_token_id
+        trackers = [OpenNoteTracker(tok._vocab, tok.frame_rate) for _ in range(K)]
+        open_notes: list[dict] = [{} for _ in range(K)]
+        results: list[list[TNote]] = [[] for _ in range(K)]
+
+        def apply(k, actions, conf):
+            for act in actions:
+                if isinstance(act, _StartNote):
+                    open_notes[k][(act.program, act.pitch)] = (act.time, conf)
+                elif isinstance(act, _EndNote):
+                    onset, c = open_notes[k].pop((act.program, act.pitch))
+                    results[k].append(
+                        TNote(onset, act.time, act.pitch, tm._instrument_for_program(act.program), False, c)
+                    )
+                elif isinstance(act, _DrumHit):
+                    results[k].append(TNote(act.time, act.time + 0.01, act.pitch, "drums", True, conf))
+
+        if progress:
+            progress(0, n_chunks)
+        with torch.inference_mode(), self._maybe_quiet():
+            for ci in range(n_chunks):
+                bnd = ChunkBoundary(ci * SEGMENT_SECONDS, (ci + 1) * SEGMENT_SECONDS if ci + 1 < n_chunks else None)
+                prompts = []
+                for k in range(K):
+                    # The boundary settles the tracker, so open_keys() is
+                    # exactly what the next chunk must declare as sustained.
+                    apply(k, trackers[k].feed(bnd), 1.0)
+                    prompts.append(tok.tie_section_token_ids(trackers[k].open_keys()) if ci > 0 else [])
+                conds = [tm._build_conditions(w[:, ci * seg: (ci + 1) * seg], group)[0] for w in wavs]
+                cfg = lm.condition_provider(lm.condition_provider.tokenize(conds))
+                # Nearly every chunk needs far fewer tokens than MuScriptor's
+                # limit, and the attention cache is allocated for the limit:
+                # start small, redo the rare chunk that doesn't fit.
+                for max_len in TOKEN_BUDGETS:
+                    seq, prob, last, done = self._decode_chunk(lm, cfg, prompts, forbidden, eos, ungen, max_len)
+                    if done:
+                        break
+                self.longest_chunk = max(self.longest_chunk, last)
+                rows, probs = seq[:, 1: last + 1].tolist(), prob[:, 1: last + 1].tolist()
+                for k in range(K):
+                    for t, c in zip(rows[k], probs[k]):
+                        if t == eos:
+                            break
+                        apply(k, trackers[k].feed(t), c)
+                if progress:
+                    progress(ci + 1, n_chunks)
+        out = []
+        for k in range(K):
+            apply(k, trackers[k].finish(), 1.0)
+            out.append(_clean(results[k], len(audios[k]) / SAMPLE_RATE))
+        return out
+
+    def _decode_chunk(self, lm, cfg, prompts, forbidden, eos, ungen, max_len):
+        """Greedy decoding of one chunk for every signal in the batch.
+        Returns (tokens, their probabilities, steps taken, all finished)."""
+        from muscriptor.modules.streaming import increment_steps, init_states
+
+        device = lm.emb.weight.device
+        K = len(prompts)
+        prepend = sum(c.shape[1] for c, _ in cfg.values())
+        state = init_states(lm, batch_size=K, sequence_length=prepend + max_len)
+        seq = torch.full((K, max_len + 1), ungen, device=device, dtype=torch.long)
+        seq[:, 0] = lm.initial_token_id
+        for k, pr in enumerate(prompts):
+            if pr:
+                seq[k, 1: 1 + len(pr)] = torch.tensor(pr[:max_len], device=device)
+        prob = torch.ones((K, max_len + 1), device=device)
+        start = min(min(len(pr) for pr in prompts), max_len - 1)
+        finished = torch.zeros(K, dtype=torch.bool, device=device)
+        last = start
+        with lm.autocast:
+            for offset in range(start, max_len):
+                first = offset == start
+                inp = seq[:, : offset + 1] if first else seq[:, offset: offset + 1]
+                logits = lm(inp, cfg, first_step=first, model_state=state)[:, -1, :].float()
+                logits[:, VOCAB_SIZE:] = -torch.inf  # reserved tokens
+                if forbidden is not None:
+                    logits[:, forbidden] = -torch.inf
+                increment_steps(lm.transformer, state, increment=inp.shape[-1] + (prepend if first else 0))
+                p, nxt = torch.softmax(logits, dim=-1).max(dim=-1)
+                forced = seq[:, offset + 1] != ungen
+                nxt = torch.where(forced, seq[:, offset + 1], nxt)
+                seq[:, offset + 1] = nxt
+                prob[:, offset + 1] = torch.where(forced, torch.ones_like(p), p)
+                finished |= nxt == eos
+                last = offset + 1
+                if bool(finished.all()):
+                    break
+        del state
+        return seq, prob, last, bool(finished.all())
+
+    def _transcribe_beam(self, mono16k, instruments, beam_size, progress) -> list[TNote]:
+        """MuScriptor's own (unbatched) decoding, for beam search."""
         from muscriptor.events import NoteEndEvent, NoteStartEvent, ProgressEvent
-        from muscriptor.tokenizer.notes import Note, trim_overlapping_notes, validate_notes
 
         wav = torch.from_numpy(np.ascontiguousarray(mono16k, dtype=np.float32))[None]
         open_notes: dict[int, TNote] = {}
@@ -125,30 +260,37 @@ class Transcriber:
                     n = open_notes.pop(ev.start_event_index)
                     n.offset = ev.end_time
                     notes.append(n)
-        # Same clean-up MuScriptor applies before writing MIDI. It works on
-        # program numbers, so give each instrument name its own.
-        names = sorted({n.instrument for n in notes if not n.is_drum})
-        program_of = {name: i for i, name in enumerate(names)}
-        mnotes = [
-            Note(is_drum=n.is_drum, program=128 if n.is_drum else program_of[n.instrument],
-                 onset=n.onset, offset=n.offset, pitch=n.pitch)
-            for n in notes
-        ]
-        mnotes = validate_notes(mnotes, fix=True)
-        mnotes = trim_overlapping_notes(mnotes, sort=True)
-        return [
-            TNote(m.onset, m.offset, m.pitch, "drums" if m.is_drum else names[m.program], m.is_drum)
-            for m in mnotes
-        ]
+        return _clean(notes, len(mono16k) / SAMPLE_RATE)
 
 
-def print_progress(label: str):
+def _clean(notes: list[TNote], duration: float) -> list[TNote]:
+    """The clean-up MuScriptor applies before writing MIDI: a minimum length,
+    and a note ends where the next one of the same pitch and instrument
+    starts. Notes past the end of the audio (padding) are dropped."""
+    notes = [n for n in notes if n.onset < duration]
+    by_key: dict = {}
+    for n in notes:
+        if not n.is_drum and n.offset - n.onset < 0.01:
+            n.offset = n.onset + 0.01
+        by_key.setdefault((n.instrument, n.pitch, n.is_drum), []).append(n)
+    out = []
+    for group in by_key.values():
+        group.sort(key=lambda n: n.onset)
+        for a, b in zip(group, group[1:]):
+            if a.offset > b.onset:
+                a.offset = b.onset
+        out += [n for n in group if n.onset < n.offset]
+    out.sort(key=lambda n: (n.onset, n.is_drum, n.pitch, n.instrument))
+    return out
+
+
+def print_progress(label: str, unit: str = "chunks"):
     out = sys.stdout  # the real terminal, before transcribe() silences MuScriptor
 
     def cb(done, total):
         width = 30
         filled = int(width * done / max(1, total))
-        out.write(f"\r      {label}: [{'#' * filled}{'.' * (width - filled)}] {done}/{total} chunks")
+        out.write(f"\r      {label}: [{'#' * filled}{'.' * (width - filled)}] {done}/{total} {unit}")
         out.flush()
         if done >= total:
             out.write("\n")
