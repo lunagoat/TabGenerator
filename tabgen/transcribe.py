@@ -85,7 +85,7 @@ class Transcriber:
         dtype: torch.dtype = torch.float32,
     ):
         self.quiet = quiet
-        self.longest_chunk = 0
+        self.long_chunks = 0  # chunks that needed more than the usual token budget
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         with self._maybe_quiet():
@@ -180,12 +180,18 @@ class Transcriber:
                 # Nearly every chunk needs far fewer tokens than MuScriptor's
                 # limit, and the attention cache is allocated for the limit:
                 # start small, redo the rare chunk that doesn't fit.
-                for max_len in TOKEN_BUDGETS:
-                    seq, prob, last, done = self._decode_chunk(lm, cfg, prompts, forbidden, eos, ungen, max_len)
-                    if done:
-                        break
-                self.longest_chunk = max(self.longest_chunk, last)
+                seq, prob, last, done = self._decode_chunk(lm, cfg, prompts, forbidden, eos, ungen, TOKEN_BUDGETS[0])
                 rows, probs = seq[:, 1: last + 1].tolist(), prob[:, 1: last + 1].tolist()
+                if not done:
+                    # One signal at a time: the full-size cache for the whole
+                    # batch would need several GB at once.
+                    for k in range(K):
+                        if eos in rows[k]:
+                            continue
+                        one = {name: (c[k: k + 1], m[k: k + 1]) for name, (c, m) in cfg.items()}
+                        seq, prob, last, _ = self._decode_chunk(lm, one, [prompts[k]], forbidden, eos, ungen, TOKEN_BUDGETS[1])
+                        rows[k], probs[k] = seq[0, 1: last + 1].tolist(), prob[0, 1: last + 1].tolist()
+                        self.long_chunks += 1
                 for k in range(K):
                     for t, c in zip(rows[k], probs[k]):
                         if t == eos:

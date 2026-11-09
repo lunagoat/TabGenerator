@@ -36,7 +36,7 @@ def setup_paths():
     if stem_packages.is_dir():
         sys.path.insert(2, str(stem_packages))
     missing = []
-    for mod in ("torch", "demucs", "muscriptor", "beat_this", "guitarpro", "soundfile", "soxr", "mido"):
+    for mod in ("torch", "einops", "muscriptor", "beat_this", "guitarpro", "soundfile", "soxr", "mido"):
         try:
             __import__(mod)
         except ImportError:
@@ -44,7 +44,7 @@ def setup_paths():
     if missing:
         print(f"\nMissing Python packages: {', '.join(missing)}")
         print(f'Run the setup script: "{SCRIPT_DIR / "setup.sh"}"')
-        print("(PyTorch and Demucs come from StemSplitter; run its setup.sh if those are missing.)")
+        print("(PyTorch comes from StemSplitter; run its setup.sh if torch or einops is missing.)")
         raise SystemExit(1)
 
 
@@ -61,7 +61,12 @@ def main():
                         help="MuScriptor size (default: large, the most accurate)")
     parser.add_argument("--weights", help="path to MuScriptor model.safetensors (default: ~/muscriptor-<size>/)")
     parser.add_argument("--beam", type=int, default=1, help="beam search width (default: 1)")
-    parser.add_argument("--shifts", type=int, default=2, help="Demucs random shifts; more = cleaner stems, slower (default: 2)")
+    parser.add_argument("--separator", default="roformer", choices=["roformer", "demucs"],
+                        help="stem separation model: BS-RoFormer (default, cleaner stems) or Demucs htdemucs_6s via StemSplitter")
+    parser.add_argument("--shifts", type=int, default=2, help="with --separator demucs: random shifts; more = cleaner stems, slower (default: 2)")
+    parser.add_argument("--batch", type=int, default=8,
+                        help="transcriptions decoded at once (default: 8; lower it if the GPU runs out of memory)")
+    parser.add_argument("--full-precision", action="store_true", help="run the model in 32-bit floats on the GPU (slower, same results)")
     parser.add_argument("--device", help="cuda or cpu (default: cuda if available)")
     parser.add_argument("--fast", action="store_true",
                         help="one transcription pass per part instead of voting over several (~3x faster, a bit less accurate)")
@@ -114,6 +119,9 @@ def main():
             parts=parts,
             split_guitars=not args.one_guitar,
             fast=args.fast,
+            separator=args.separator,
+            batch=max(1, args.batch),
+            full_precision=args.full_precision,
         )
         out = run(Path(f), opts)
         if not args.no_open and len(files) == 1:

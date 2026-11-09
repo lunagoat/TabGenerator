@@ -25,30 +25,36 @@ The `.gp5` is the best way to check a tab: play it back alongside the song.
 ## How it works
 
 1. **Decode** with ffmpeg (anything ffmpeg reads).
-2. **Stem separation** with StemSplitter (the folder next to this one): Demucs
-   `htdemucs_6s`, with random-shift averaging for cleaner stems. Stems that
-   StemSplitter already made for a song are reused.
-3. **Beat and bar tracking** with beat_this, smoothed per beat so songs
-   without a click track still line up.
-4. **Note transcription** with MuScriptor-large (Kyutai x Mirelo, July 2026),
-   the most accurate open multi-instrument transcription model available,
-   run 8 times on different stem mixes (plus 3 stereo-position passes for
-   guitar); each part keeps the notes that at least two of its
-   transcriptions agree on.
-5. **Rhythm**: each beat gets the subdivision (8ths, 16ths, triplets, 32nds)
-   that best explains its notes; 6/8 and 12/8 feels are detected.
+2. **Stem separation** with BS-RoFormer SW (drums, bass, guitar, piano,
+   vocals, other). Its stems are much cleaner than Demucs `htdemucs_6s`,
+   which matters more than anything else for the notes that come out.
+   `--separator demucs` uses Demucs through StemSplitter instead.
+3. **Beat and bar tracking**: beat_this's beat/downbeat activations, decoded
+   with a tempo-continuity search (`tabgen/beats.py`) instead of plain peak
+   picking, so quiet intros and breaks keep a steady grid and bar lines
+   don't jump around when a downbeat is missed.
+4. **Note transcription** with MuScriptor-large (Kyutai x Mirelo, July 2026).
+   Each part's stem is transcribed several times with the audio shifted by a
+   couple of seconds: the model works in 5-second chunks and makes most of
+   its mistakes near chunk edges, and a shifted pass has its edges elsewhere.
+   A note is kept when two passes agree on it, and its timing is the median
+   of the passes. All passes are decoded together on the GPU in half
+   precision, which is several times faster than one after another.
+5. **Rhythm**: each part gets, per beat, the subdivision (8ths, 16ths,
+   triplets, 32nds) that best explains its own notes; a lone triplet beat in
+   a straight passage needs clear evidence. 6/8 and 12/8 feels are detected.
 6. **Tuning detection** (E standard, Eb, Drop D, D, Drop C#, Drop C, C, B,
    7-string, 5-string bass, ...) from the lowest notes played and how
    naturally the part fits each tuning. Distorted power chords make ghost
    notes an octave below their root; those are ignored. The bass follows the
    guitar's tuning unless its notes clearly need a lower one.
-7. **Separate guitar parts**: the guitar audio is split by stereo position
-   (left / center / right) and each side is transcribed on its own. Those
-   transcriptions also vote on the guitar notes (a guitar that is quiet in
-   the mono mix is heard on its own side), and each note goes to the part
-   whose side it was heard on. A riff double-tracked hard left and right
-   stays one part. Each position is split again when it holds two guitar
-   sounds (clean and distorted). Mono recordings skip this.
+7. **Separate guitar parts**: the guitar stem is split by stereo position
+   (left / center / right) and each side is transcribed on its own; each
+   note goes to the part whose side it was heard on. A riff double-tracked
+   hard left and right stays one part. A position is split again when two
+   guitar sounds (clean and distorted) play there at the same time; one
+   guitarist switching sounds between sections stays one part. Mono
+   recordings skip this.
 8. **Fingering**: a Viterbi search over string/fret choices that tracks where
    the fretting hand is, penalising stretches, big hand shifts, string skips
    and putting two notes that ring together on one string.
@@ -59,23 +65,25 @@ The `.gp5` is the best way to check a tab: play it back alongside the song.
 --parts guitar,bass     only some parts
 --guitar-tuning "Drop D"   override the detected tuning (also --bass-tuning)
 --one-guitar            one guitar tab with everything (no stereo/sound split; saves 3 passes)
---fast                  one transcription per part instead of voting (~3x faster)
---model medium          faster, slightly less accurate (default: large)
---beam 4                beam search (slower; made no measurable difference in testing)
---shifts 5              more Demucs shift averaging (slower, marginally cleaner stems)
+--fast                  one transcription per part instead of voting
+--separator demucs      Demucs htdemucs_6s (via StemSplitter) instead of BS-RoFormer
+--batch 4               fewer transcriptions decoded at once (if the GPU runs out of memory)
+--model medium          faster, less accurate (default: large)
+--beam 4                beam search (much slower; made no measurable difference in testing)
 --resplit               redo stem separation even if stems exist
 --retranscribe          ignore cached transcriptions
 -o DIR                  output folder
 --no-open               don't open the output folder when done
 ```
 
-Intermediate results (decoded audio, beats, notes) are cached in `.cache/`, so
-re-running a song with different tab options is instant.
+Intermediate results (decoded audio, stems, beats, notes) are cached in
+`.cache/`, so re-running a song with different tab options is instant.
 
 ## Setup
 
 The script uses base Python and loads packages from `_packages` (no virtual
-environment), plus PyTorch and Demucs from `StemSplitter/_packages`. To
+environment), plus PyTorch (and Demucs, for `--separator demucs`) from
+`StemSplitter/_packages`. To
 install or restore packages, run `./setup.sh` from this folder (and
 StemSplitter's `setup.sh` if PyTorch/Demucs are missing).
 
@@ -84,46 +92,55 @@ They are read from `~/muscriptor-large/model.safetensors`; to put them
 elsewhere use `--weights PATH` or set `MUSCRIPTOR_WEIGHTS`. If there is no
 local copy, they are downloaded using your Hugging Face login.
 
-The large model needs about 7 GB of GPU memory. It runs on the CPU too, but
+The BS-RoFormer weights (700 MB) are downloaded once to
+`~/.cache/tabgenerator/` (or point `BS_ROFORMER_WEIGHTS` at the file).
+
+The large model needs about 6 GB of GPU memory at the default `--batch 8`. It runs on the CPU too, but
 very slowly; use `--model small` there.
 
 ## How accurate is it?
 
-All numbers are note F1 scores (1.0 = every note found, nothing extra).
-A note counts as correct when its pitch is exact (drums: the right drum)
-and it starts within 50 ms of the real one.
+Note F1 scores (1.0 = every note found, nothing extra). A note counts as
+correct when its pitch is exact (drums: the right kind of drum) and it
+starts within 50 ms of the real one. "Before" is the previous version of
+this tool (Demucs stems, voting over different stem mixes).
 
-| Part | Test set | Full mix only | Best single stem | **TabGenerator** | Ceiling |
-|---|---|---|---|---|---|
-| Drums | MDB Drums: 23 real recordings | 0.711 | 0.758 | **0.767** | 0.812 (isolated drum tracks) |
-| Bass | BabySlakh: 8 songs, 60 s each | 0.606 | 0.746 | **0.792** | |
-| Guitar | BabySlakh: 8 songs, 60 s each | 0.361 | 0.424 | **0.483** | |
+| Part | Test set | Before | **Now** |
+|---|---|---|---|
+| Guitar | real playing through distortion, in a band mix (24 excerpts) | 0.638 | **0.778** |
+| Guitar | the same playing clean, in a band mix | 0.677 | **0.821** |
+| Bass | the same band mixes (distorted / clean guitar) | 0.866 / 0.867 | **0.961 / 0.926** |
+| Bass | BabySlakh: 19 synthetic songs, 60 s each | 0.714 | **0.914** |
+| Drums | MDB Drums: 23 real recordings | 0.824 | **0.860** |
+| Drums | the band mixes | | **0.934** |
 
-The gains come from voting: each part is transcribed several times from
-different audio (its Demucs stem, the band without drums/vocals, the full
-mix, with and without restricting the model to that instrument), and a note
-is kept when at least two transcriptions agree on it. Bass additionally keeps
-only the lowest note when several start together. `--fast` uses the single
-best transcription per part instead (about 3x faster).
+The band mixes are made for testing: real guitar playing from GuitarSet
+(its pickup signal, clean or through a simulated high-gain amp), real drums
+from MDB Drums and a bass stem from Slakh, each with its true notes. They
+don't play the same song, but separation and transcription don't know that.
+MDB Drums is mostly jazz with brushes and ghost notes; on its rock-style
+songs the drum score is 0.88 to 1.0. On BabySlakh the bass truth was moved to
+the octave that actually sounds (Slakh's bass patches play an octave below
+their MIDI notes).
 
-The guitar number is pessimistic: BabySlakh songs stack 3 to 5 synthetic
-guitars, and its 16 kHz audio handicaps Demucs, so stems do better on real
-songs (as the drum test on real recordings shows).
-
-Guitar parts, on BabySlakh songs remixed with 2-3 guitars panned apart:
-78% of notes played by only one guitar end up in that guitar's tab, and 95%
-of a double-tracked part stays together. Letting the stereo-position
-transcriptions vote found more guitar notes (F1 0.502 -> 0.523) and made
-each part's tab more accurate (0.427 -> 0.451).
+Where the gain comes from, on the distorted-guitar mixes: cleaner stems and
+listening to the guitar stem alone instead of the whole band 0.638 -> 0.717,
+voting over shifted passes -> 0.778. For drums on MDB: stems 0.824 -> 0.847,
+shifted passes -> 0.860.
 
 String/fret choice, scored on GuitarSet's real tabs (given the right
-notes): the string the real player used is chosen for 73% of notes, vs
-54.5% for "always the lowest fret". The rest are playable alternatives in
-another position.
+notes): the string the real player used is chosen for 75% of notes (73%
+for a player the weights were not tuned on), vs 54.5% for "always the lowest
+fret". The rest are playable alternatives in another position.
 
-Speed on an RTX 5070 Ti: about 13 minutes for a 4-minute stereo song (about
-4 with `--fast`, which also skips the guitar split). Re-running
-a song reuses the cached stems and transcriptions and takes seconds.
+Speed on an RTX 5070 Ti: about 5.5 minutes for a 5-minute stereo song
+(11 transcriptions), down from roughly 13 minutes for a 4-minute song.
+Re-running a song reuses the cached stems and transcriptions and takes
+seconds.
+
+Everything in `eval/` reproduces these numbers (`eval/recipes.py`,
+`eval/eval_fingering.py`, `eval/eval_beats.py`, `eval/eval_rhythm.py`); the
+test data is downloaded separately into `eval/data/`.
 
 ## Limitations
 

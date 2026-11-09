@@ -129,3 +129,26 @@ def merge(
             i = j
     out.sort(key=lambda n: (n.onset, n.pitch))
     return out
+
+
+HIHAT_ALIASES = {54}  # tambourine
+CLOSED_HIHAT = 42
+
+
+def normalize_drums(notes: list[TNote], window: float = 0.03) -> list[TNote]:
+    """Fold the model's "tambourine" into the hi-hat.
+
+    MuScriptor often writes a tambourine hit on top of (or instead of) a
+    closed hi-hat: on MDB Drums 70% of its tambourine hits sit on a real
+    hi-hat hit and 1% on a real tambourine. A tambourine hit with a hi-hat
+    hit next to it is dropped; one on its own becomes a closed hi-hat."""
+    hats = sorted(n.onset for n in notes if n.is_drum and DRUM_TYPE.get(n.pitch) == "hihat")
+    out = []
+    for n in notes:
+        if n.is_drum and n.pitch in HIHAT_ALIASES:
+            i = bisect.bisect_left(hats, n.onset - window)
+            if i < len(hats) and hats[i] <= n.onset + window:
+                continue
+            n = TNote(n.onset, n.offset, CLOSED_HIHAT, n.instrument, True, n.conf)
+        out.append(n)
+    return out

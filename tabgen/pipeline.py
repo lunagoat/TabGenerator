@@ -17,41 +17,44 @@ from .transcribe import BASSES, DRUMS, GUITARS, SAMPLE_RATE, TNote
 ROOT = Path(__file__).resolve().parents[1]
 CACHE_VERSION = 2
 
-# Transcription passes: which audio the model hears, and which instruments
-# it may output (None = any; notes of other instruments are then discarded,
-# which works better than forcing leaked sounds into the wanted instrument).
+# Transcription passes: which audio the model hears, which instruments it
+# may output (None = any; notes of other instruments are then discarded) and
+# how much silence is put in front. MuScriptor works in 5-second chunks and
+# makes most of its mistakes near their edges; a shifted pass has its edges
+# elsewhere, so passes that differ only in shift disagree exactly where one
+# of them is unreliable.
 PASSES = {
-    "mix": {"stems": ["mix"], "instruments": None},
-    "band": {"stems": ["guitar", "other", "piano", "bass"], "instruments": None},
-    "guitars_in_gop": {"stems": ["guitar", "other", "piano"], "instruments": GUITARS},
-    "guitar_stem": {"stems": ["guitar"], "instruments": None},
-    "bass_stem": {"stems": ["bass"], "instruments": None},
-    "bass_in_bass_stem": {"stems": ["bass"], "instruments": BASSES},
-    "drums_in_drum_stem": {"stems": ["drums"], "instruments": DRUMS},
-    "drum_stem": {"stems": ["drums"], "instruments": None},
-    # Guitar audio split by where it sits in the stereo mix; used to tell
+    "guitar": {"stems": ["guitar"], "instruments": None},
+    "guitar@2.5": {"stems": ["guitar"], "instruments": None, "shift": 2.5},
+    "guitar@3.75": {"stems": ["guitar"], "instruments": None, "shift": 3.75},
+    "bass_forced": {"stems": ["bass"], "instruments": BASSES},
+    "bass_forced@2.5": {"stems": ["bass"], "instruments": BASSES, "shift": 2.5},
+    "drums": {"stems": ["drums"], "instruments": None},
+    "drums@2.5": {"stems": ["drums"], "instruments": None, "shift": 2.5},
+    "drums@3.75": {"stems": ["drums"], "instruments": None, "shift": 3.75},
+    # Guitar stem split by where it sits in the stereo mix; used to tell
     # guitar parts apart, not for voting.
-    "guitars_left": {"stems": ["guitar", "piano", "other"], "instruments": None, "position": "left"},
-    "guitars_center": {"stems": ["guitar", "piano", "other"], "instruments": None, "position": "center"},
-    "guitars_right": {"stems": ["guitar", "piano", "other"], "instruments": None, "position": "right"},
+    "guitars_left": {"stems": ["guitar"], "instruments": None, "position": "left"},
+    "guitars_center": {"stems": ["guitar"], "instruments": None, "position": "center"},
+    "guitars_right": {"stems": ["guitar"], "instruments": None, "position": "right"},
 }
 POSITION_PASSES = ["guitars_left", "guitars_center", "guitars_right"]
 # Below this much left/right difference the guitars are treated as mono.
 MIN_STEREO_SPREAD = 0.03
 
-# Per part: passes to vote over (most reliable first) and the votes a note
-# needs. Chosen on BabySlakh (guitar, bass) and MDB Drums (real recordings);
-# see README "How accurate is it?".
+# Per part: the passes that vote and the votes a note needs. Chosen on real
+# guitar playing inside a band mix, BabySlakh and MDB Drums; see the README
+# and eval/recipes.py.
 PARTS = {
-    "guitar": {"passes": ["band", "guitars_in_gop", "guitar_stem", "mix"], "min_votes": 2},
-    "bass": {"passes": ["bass_stem", "bass_in_bass_stem", "band"], "min_votes": 2, "lowest_only": True},
-    "drums": {"passes": ["drums_in_drum_stem", "drum_stem", "mix"], "min_votes": 2},
+    "guitar": {"passes": ["guitar", "guitar@2.5", "guitar@3.75"], "min_votes": 2},
+    "bass": {"passes": ["bass_forced", "bass_forced@2.5"], "min_votes": 2, "lowest_only": True},
+    "drums": {"passes": ["drums", "drums@2.5", "drums@3.75"], "min_votes": 2},
 }
 # --fast: the best single pass per part.
 FAST_PARTS = {
-    "guitar": {"passes": ["band"], "min_votes": 1},
-    "bass": {"passes": ["bass_stem"], "min_votes": 1, "lowest_only": True},
-    "drums": {"passes": ["drums_in_drum_stem"], "min_votes": 1},
+    "guitar": {"passes": ["guitar"], "min_votes": 1},
+    "bass": {"passes": ["bass_forced"], "min_votes": 1, "lowest_only": True},
+    "drums": {"passes": ["drums"], "min_votes": 1},
 }
 PART_LABELS = {"guitar": set(GUITARS), "bass": set(BASSES), "drums": {"drums"}}
 
@@ -229,7 +232,7 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
     """Run the transcription passes and vote. Returns the notes per part, and
     the guitar notes grouped by stereo position (None when not split)."""
     from . import stereo
-    from .ensemble import lowest_only, vote
+    from .ensemble import lowest_only, merge, normalize_drums
     from .transcribe import Transcriber, print_progress
 
     plan = FAST_PARTS if opts.fast else PARTS
@@ -329,13 +332,12 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
     for part in opts.parts:
         labels = PART_LABELS[part]
         per_pass = [[n for n in results[p] if n.instrument in labels] for p in plan[part]["passes"]]
-        if part == "guitar" and guitar_stereo is not None:
-            # The left/center/right transcriptions also vote (as one voter):
-            # a guitar that is quiet in the mono mixes, e.g. one panned away
-            # from the others, is heard there. On panned test mixes this found
-            # more guitar notes (F1 0.502 -> 0.523) and cleaner parts.
-            per_pass.append([n for p in POSITION_PASSES for n in results[p] if n.instrument in labels])
-        out[part] = vote(per_pass, plan[part]["min_votes"])
+        if part == "drums":
+            per_pass = [normalize_drums(ns) for ns in per_pass]
+        if len(per_pass) == 1:
+            out[part] = list(per_pass[0])
+        else:
+            out[part] = merge(per_pass, plan[part]["min_votes"])
         if plan[part].get("lowest_only"):
             out[part] = lowest_only(out[part])
         counts = ", ".join(str(len(x)) for x in per_pass)
@@ -414,9 +416,22 @@ def split_guitar_parts(notes: list[TNote]) -> list[tuple[str, list[TNote]]]:
     for n in notes:
         counts[n.instrument] = counts.get(n.instrument, 0) + 1
     major = [k for k, c in counts.items() if c >= 0.2 * len(notes)]
+    major.sort(key=lambda k: -counts[k])
+    # One guitarist going from a clean verse to a distorted chorus is still
+    # one part: a second sound only gets its own part when it mostly plays
+    # at the same time as the main one.
+    window = 2.0
+    n_win = int(max(n.onset for n in notes) // window) + 1
+    active = {
+        k: np.bincount([int(n.onset // window) for n in notes if n.instrument == k], minlength=n_win) >= 2
+        for k in major
+    }
+    major = major[:1] + [
+        k for k in major[1:]
+        if active[k].sum() and (active[k] & active[major[0]]).sum() >= 0.5 * active[k].sum()
+    ]
     if len(major) <= 1:
         return [("", notes)]
-    major.sort(key=lambda k: -counts[k])
     groups: dict[str, list[TNote]] = {k: [] for k in major}
     onsets = {k: np.array(sorted(n.onset for n in notes if n.instrument == k)) for k in major}
     for n in notes:
@@ -541,7 +556,7 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
         + f"   Time: {common_meter[0]}/{common_meter[1]}"
         + (f"   (onsets shifted {delay * 1000:+.0f} ms to the beat)" if abs(delay) > 0.0005 else ""),
     ]
-    note_line = "Transcribed automatically (Demucs + MuScriptor + TabGenerator). Check it by ear!"
+    note_line = "Transcribed automatically (TabGenerator: BS-RoFormer + MuScriptor). Check it by ear!"
 
     files: list[Path] = []
     gp_parts: list[gp_export.GPPart] = []
