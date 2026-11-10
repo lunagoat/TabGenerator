@@ -71,6 +71,8 @@ def main():
     parser.add_argument("--fast", action="store_true",
                         help="one transcription pass per part instead of voting over several (~3x faster, a bit less accurate)")
     parser.add_argument("--one-guitar", action="store_true", help="never split guitars into separate parts")
+    parser.add_argument("--raw", action="store_true",
+                        help="write the notes as transcribed: no tidying of repeats, chords and overtones, no playability check")
     parser.add_argument("--resplit", action="store_true", help="redo stem separation even if stems exist")
     parser.add_argument("--retranscribe", action="store_true", help="ignore cached transcriptions")
     parser.add_argument("-o", "--output", help="output folder (default: Tabs/<song name>)")
@@ -122,6 +124,7 @@ def main():
             separator=args.separator,
             batch=max(1, args.batch),
             full_precision=args.full_precision,
+            tidy=not args.raw,
         )
         out = run(Path(f), opts)
         if not args.no_open and len(files) == 1:

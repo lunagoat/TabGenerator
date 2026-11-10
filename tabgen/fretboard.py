@@ -103,6 +103,8 @@ class FingeringWeights:
     ringing_clash: float = 3.0  # new note on a string that is still ringing
     top_k: int = 16
     run_move: float = 2.0  # extra per-fret movement cost between single notes
+    open_anchor: float = 0.3  # per fret of hand position above 2 while an open string is played
+    index_reach: float = 0.0  # per fret between the index finger and the lowest fretted note
     rest_ease: float = 0.5  # blend onset spacing (0) with actual note-off rest (1)
 
 
@@ -254,7 +256,13 @@ class _Layer:
                 stretch = max(0, hi - (h + 3)) if fretted else 0
                 cand_idx.append(ci)
                 hand.append(h)
-                static.append(cost + w.stretch * stretch + w.height * h)
+                # Open strings are played with the hand near the nut: a riff
+                # that mixes them with fretted notes sits in open position.
+                anchor = w.open_anchor * max(0, h - 2) if len(fretted) < len(frets) else 0.0
+                # The index finger usually takes the lowest fretted note:
+                # nobody chugs a 4th-fret note with the hand parked at the nut.
+                reach = w.index_reach * (lo - h) if fretted else 0.0
+                static.append(cost + w.stretch * stretch + w.height * h + anchor + reach)
                 mask.append(m)
                 single.append(strings[0] if len(strings) == 1 else -1)
         self.cand_idx = np.array(cand_idx)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import fretboard, gp_export, rhythm, separate, tab_text
+from . import arrange, fretboard, gp_export, rhythm, separate, tab_text
 from .transcribe import BASSES, DRUMS, GUITARS, SAMPLE_RATE, TNote
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +91,7 @@ class Options:
     separator: str = "roformer"  # or "demucs" (htdemucs_6s through StemSplitter)
     batch: int = 8  # transcription passes decoded together (GPU memory vs speed)
     full_precision: bool = False  # fp32 on the GPU instead of fp16
+    tidy: bool = True  # make repeats agree and keep each part playable by one guitarist
 
 
 def _device(opts: Options) -> str:
@@ -448,6 +449,37 @@ def split_guitar_parts(notes: list[TNote]) -> list[tuple[str, list[TNote]]]:
     return [(PART_TITLES.get(k, k), groups[k]) for k in major]
 
 
+def _separate_layers(groups, bm):
+    """Move a line that another guitar plays on top of a riff out of the
+    riff's part (see arrange.split_layers): into the part that already plays
+    in that register if there is one, else into a part of its own."""
+    mains, tops = [], []
+    for flavour, gnotes in groups:
+        q = rhythm.quantize_each(bm, gnotes, bm.subdivisions)
+        main, top = arrange.split_layers(gnotes, bm, q)
+        if len(main) < MIN_PART_NOTES:  # nothing left underneath: not a layer
+            main, top = gnotes, []
+        mains.append((flavour, main))
+        tops.append(top)
+    out = [(f, list(ns)) for f, ns in mains]
+    for gi, top in enumerate(tops):
+        if not top:
+            continue
+        pitch = float(np.median([n.pitch for n in top]))
+        near = [
+            (abs(float(np.median([n.pitch for n in ns])) - pitch), j)
+            for j, (_, ns) in enumerate(mains) if j != gi and ns
+        ]
+        near = [x for x in near if x[0] <= 7]
+        if near:
+            out[min(near)[1]][1].extend(top)
+        elif len(top) >= MIN_PART_NOTES:
+            where = mains[gi][0]
+            out.append((", ".join(x for x in (where, "on top") if x), top))
+        # A handful of notes on top with nowhere to go are left out.
+    return [(f, sorted(ns, key=lambda n: (n.onset, n.pitch))) for f, ns in out if ns]
+
+
 def _part_grid(bm, notes, shuffle):
     """The beat map with subdivisions chosen for this part's own notes, so a
     busy guitar doesn't force a fine grid onto a simple drum beat."""
@@ -455,9 +487,14 @@ def _part_grid(bm, notes, shuffle):
     return replace(bm, subdivisions=rhythm.choose_subdivisions(bm, onsets, shuffle))
 
 
-def _events(notes, bm):
-    """Quantized notes grouped into chords: (ticks, notes per tick, fretboard events)."""
+def _events(notes, bm, report: "arrange.Report | None" = None):
+    """Quantized notes grouped into chords: (ticks, notes per tick, fretboard events).
+    With a report, the notes are tidied first (see arrange.py)."""
     q = rhythm.quantize(bm, notes, bm.subdivisions)
+    if report is not None:
+        q = arrange.remove_overtones(q, report)
+        q = arrange.regularize_chords(q, report)
+        q = arrange.unify_repeats(q, bm, report)
     by_tick: dict[int, list] = {}
     for n in q:
         by_tick.setdefault(n.onset_tick, []).append(n)
@@ -475,9 +512,11 @@ def _events(notes, bm):
     return ticks, by_tick, events
 
 
-def _fretted_part(title, notes, bm, tunings_table_bass: bool, forced_tuning, program_default, band_tuning=None):
+def _fretted_part(title, notes, bm, tunings_table_bass: bool, forced_tuning, program_default, band_tuning=None,
+                  tidy: bool = True):
     """Quantize, choose tuning, finger, and build text + GP data for one part."""
-    ticks, by_tick, events = _events(notes, bm)
+    report = arrange.Report() if tidy else None
+    ticks, by_tick, events = _events(notes, bm, report)
     if forced_tuning:
         tuning = fretboard.find_tuning(forced_tuning, tunings_table_bass)
     else:
@@ -485,6 +524,10 @@ def _fretted_part(title, notes, bm, tunings_table_bass: bool, forced_tuning, pro
     moved = fretboard.fit_to_range(events, tuning)
     max_fret = 24
     fingerings, _ = fretboard.assign_frets(events, tuning, max_fret)
+    out_of_reach = 0
+    if tidy:
+        fingerings = arrange.check_playable(events, fingerings, report)
+        out_of_reach = report.out_of_reach
     n_strings = len(tuning.strings)
     text_events: dict[int, dict[int, str]] = {}
     gp_events = []
@@ -506,9 +549,10 @@ def _fretted_part(title, notes, bm, tunings_table_bass: bool, forced_tuning, pro
     info = {
         "tuning": f"{tuning.name} ({strings_desc})",
         "notes": len(notes),
-        "dropped": dropped,
+        "dropped": dropped - out_of_reach,
         "moved": moved,
         "tuning_name": tuning.name,
+        "tidy": report.lines() if report else [],
     }
     gp_part = gp_export.GPPart(title, gp_events, tuning.strings, program, max_fret, bm=bm)
     return labels, text_events, gp_part, info
@@ -576,11 +620,13 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
             sounds = split_guitar_parts(pnotes) if opts.split_guitars else [("", pnotes)]
             for sound, gnotes in sounds:
                 groups.append((", ".join(x for x in (where, sound) if x), gnotes))
+        if opts.tidy and opts.split_guitars:
+            groups = _separate_layers(groups, bm)
         for gi, (flavour, gnotes) in enumerate(groups):
-            title = "Guitar" if len(groups) == 1 else f"Guitar {gi + 1} ({flavour})"
+            title = "Guitar" if len(groups) == 1 else f"Guitar {gi + 1} ({flavour or 'main'})"
             part_bm = _part_grid(bm, gnotes, shuffle)
             labels, events, gp_part, info = _fretted_part(
-                title, gnotes, part_bm, False, guitar_tuning, 30
+                title, gnotes, part_bm, False, guitar_tuning, 30, tidy=opts.tidy
             )
             gp_parts.append(gp_part)
             header = base_header + [
@@ -593,6 +639,7 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
                 footer.append(f"({info['moved']} notes below the lowest string were octave ghosts of power chords or were moved up an octave.)")
             if info["dropped"]:
                 footer.append(f"({info['dropped']} notes did not fit on the neck and were left out.)")
+            footer += info["tidy"]
             path = out_dir / f"{name} - {title}.txt"
             path.write_text(tab_text.render(header, labels, part_bm, events, footer))
             files.append(path)
@@ -600,7 +647,7 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
     if "bass" in notes:
         part_bm = _part_grid(bm, notes["bass"], shuffle)
         labels, events, gp_part, info = _fretted_part(
-            "Bass", notes["bass"], part_bm, True, opts.bass_tuning, 33, guitar_tuning
+            "Bass", notes["bass"], part_bm, True, opts.bass_tuning, 33, guitar_tuning, tidy=opts.tidy
         )
         gp_parts.append(gp_part)
         header = base_header + ["Part: Bass", f"Tuning: {info['tuning']}", note_line]
@@ -609,6 +656,7 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
             footer.append(f"({info['moved']} notes below the lowest string were moved up an octave.)")
         if info["dropped"]:
             footer.append(f"({info['dropped']} notes did not fit on the neck and were left out.)")
+        footer += info["tidy"]
         path = out_dir / f"{name} - Bass.txt"
         path.write_text(tab_text.render(header, labels, part_bm, events, footer))
         files.append(path)

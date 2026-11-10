@@ -296,6 +296,18 @@ def detect_compound(bm: BeatMap, onsets: np.ndarray) -> bool:
 
 def quantize(bm: BeatMap, notes, subdivisions: np.ndarray) -> list[QNote]:
     """Snap note on/off times to the per-beat grid."""
+    out = quantize_each(bm, notes, subdivisions)
+    # Same pitch twice on one tick (in one part) is one note.
+    seen = {}
+    for q in out:
+        key = (q.onset_tick, q.pitch, q.instrument, q.is_drum)
+        if key not in seen or q.end_tick > seen[key].end_tick:
+            seen[key] = q
+    return sorted(seen.values(), key=lambda q: (q.onset_tick, q.pitch))
+
+
+def quantize_each(bm: BeatMap, notes, subdivisions: np.ndarray) -> list[QNote]:
+    """Like `quantize`, but one result per note, in the same order."""
     bt = bm.beat_ticks
     n = len(subdivisions)
 
@@ -316,10 +328,4 @@ def quantize(bm: BeatMap, notes, subdivisions: np.ndarray) -> list[QNote]:
             end, _ = snap(nt.offset)
             end = max(end, on + step)
         out.append(QNote(on, end, nt.pitch, nt.instrument, nt.is_drum, nt.onset, nt.offset))
-    # Same pitch twice on one tick (in one part) is one note.
-    seen = {}
-    for q in out:
-        key = (q.onset_tick, q.pitch, q.instrument, q.is_drum)
-        if key not in seen or q.end_tick > seen[key].end_tick:
-            seen[key] = q
-    return sorted(seen.values(), key=lambda q: (q.onset_tick, q.pitch))
+    return out
