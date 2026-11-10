@@ -1,7 +1,7 @@
 # TabGenerator
 
 Turns any audio file (flac, wav, mp3, m4a, ogg, opus, even video files) into
-**guitar, bass and drum tabs**, plus piano and synth parts.
+**guitar, bass and drum tabs**, plus piano, synth and vocal-melody parts.
 
 Run from a terminal (quotes are required because the path contains spaces):
 
@@ -22,7 +22,7 @@ can be given at once. Output goes to `Tabs/<song name>/`:
 
 The `.gp5` is the best way to check a tab: play it back alongside the song.
 
-## Piano and synth
+## Piano, synth and vocals
 
 Keyboards are found and written out automatically, next to guitar, bass and
 drums: **Piano** comes from the separator's piano stem, **Synth** is
@@ -44,7 +44,13 @@ a made-up 7-string instrument tuned in fifths; ignore their tab line and
 read the score. The files open in TuxGuitar: `eval/tuxcheck.sh file.gp5`
 loads one with TuxGuitar's own reader and lists what it finds.
 
-Switching `--keys-as` on a song that was already run takes seconds.
+**Vocals** work the same way: the sung melody is transcribed from the vocal
+stem and written as a note roll and a notation track, or with
+`--vocals-as guitar` (or `both`) as guitar tablature. It is the melody only:
+no lyrics, and backing harmonies come out as extra notes in the same part.
+
+Switching `--keys-as` or `--vocals-as` on a song that was already run takes
+seconds.
 
 ## How it works
 
@@ -103,7 +109,8 @@ Switching `--keys-as` on a song that was already run takes seconds.
 ## Options
 
 ```
---parts guitar,bass     only some parts (guitar, bass, drums, piano, synth; keys = piano + synth)
+--parts guitar,bass     only some parts (guitar, bass, drums, piano, synth, vocals; keys = piano + synth)
+--vocals-as guitar      the sung melody as guitar tablature (or: both)
 --keys-as guitar        piano/synth as guitar tablature (or: both)
 --guitar-tuning "Drop D"   override the detected tuning (also --bass-tuning)
 --one-guitar            one guitar tab with everything (no stereo/sound split; saves 3 passes)

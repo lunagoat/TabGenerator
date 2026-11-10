@@ -54,9 +54,12 @@ def main():
         description="Generate guitar, bass, drum and keyboard tabs from an audio file.",
     )
     parser.add_argument("audio", nargs="*", help="audio file(s): flac, wav, mp3, m4a, ogg, opus, ...")
-    parser.add_argument("--parts", default="guitar,bass,drums,keys",
-                        help="comma-separated parts: guitar, bass, drums, piano, synth, keys (= piano + synth). "
+    parser.add_argument("--parts", default="guitar,bass,drums,keys,vocals",
+                        help="comma-separated parts: guitar, bass, drums, piano, synth, keys (= piano + synth), vocals. "
                              "Default: all; parts that are not in the song are skipped")
+    parser.add_argument("--vocals-as", default="roll", choices=["roll", "guitar", "both"],
+                        help="how to write the sung melody: roll = note roll and a notation track (default); "
+                             "guitar = guitar tablature; both = both")
     parser.add_argument("--keys-as", default="piano", choices=["piano", "guitar", "both"],
                         help="how to write piano/synth parts: piano = note roll and a notation track (default); "
                              "guitar = guitar tablature, with the notes moved into the guitar's range; both = both")
@@ -132,6 +135,7 @@ def main():
             full_precision=args.full_precision,
             tidy=not args.raw,
             keys_as=args.keys_as,
+            vocals_as={"roll": "piano"}.get(args.vocals_as, args.vocals_as),
         )
         out = run(Path(f), opts)
         if not args.no_open and len(files) == 1:

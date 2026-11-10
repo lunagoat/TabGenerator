@@ -39,6 +39,11 @@ PASSES = {
     "synth": {"stems": ["other"], "instruments": None},
     "synth@2.5": {"stems": ["other"], "instruments": None, "shift": 2.5},
     "synth@3.75": {"stems": ["other"], "instruments": None, "shift": 3.75},
+    # Left to itself the model writes down only part of a sung line; told
+    # that it is listening to a voice, it writes the whole melody.
+    "vocals": {"stems": ["vocals"], "instruments": ["voice"]},
+    "vocals@2.5": {"stems": ["vocals"], "instruments": ["voice"], "shift": 2.5},
+    "vocals@3.75": {"stems": ["vocals"], "instruments": ["voice"], "shift": 3.75},
     # Guitar stem split by where it sits in the stereo mix; used to tell
     # guitar parts apart, not for voting.
     "guitars_left": {"stems": ["guitar"], "instruments": None, "position": "left"},
@@ -58,6 +63,8 @@ PARTS = {
     "drums": {"passes": ["drums", "drums@2.5", "drums@3.75"], "min_votes": 2},
     "piano": {"passes": ["piano", "piano@2.5", "piano@3.75"], "min_votes": 2},
     "synth": {"passes": ["synth", "synth@2.5", "synth@3.75"], "min_votes": 2},
+    # Sung notes start softly, so two passes rarely put one within 50 ms.
+    "vocals": {"passes": ["vocals", "vocals@2.5", "vocals@3.75"], "min_votes": 2, "tolerance": 0.1},
 }
 # --fast: the best single pass per part.
 FAST_PARTS = {
@@ -66,11 +73,12 @@ FAST_PARTS = {
     "drums": {"passes": ["drums"], "min_votes": 1},
     "piano": {"passes": ["piano"], "min_votes": 1},
     "synth": {"passes": ["synth"], "min_votes": 1},
+    "vocals": {"passes": ["vocals"], "min_votes": 1},
 }
 PART_LABELS = {"guitar": set(GUITARS), "bass": set(BASSES), "drums": {"drums"}}
 # "keys" on the command line means both keyboard parts.
 PART_GROUPS = {"keys": ("piano", "synth")}
-KEY_PARTS = ("piano", "synth")
+KEY_PARTS = ("piano", "synth", "vocals")  # written as a note roll / notation, not as tab
 # A stem this much quieter than the song holds nothing worth transcribing,
 # and a part with fewer notes than this was not really there.
 SILENT_STEM = 0.02
@@ -82,6 +90,8 @@ def _wanted(part: str, note: TNote) -> bool:
     if part == "piano":
         # The separator already says "this is the piano": whatever the model
         # calls a note (a low one often "bass"), it is the piano playing.
+        return not note.is_drum
+    if part == "vocals":
         return not note.is_drum
     if part == "synth":
         # Synth sounds get all sorts of names (guitar, bells, strings...).
@@ -114,7 +124,8 @@ class Options:
     resplit: bool = False
     retranscribe: bool = False
     out_dir: Path | None = None
-    parts: tuple[str, ...] = ("guitar", "bass", "drums", "piano", "synth")
+    parts: tuple[str, ...] = ("guitar", "bass", "drums", "piano", "synth", "vocals")
+    vocals_as: str = "piano"  # like keys_as, for the sung melody
     keys_as: str = "piano"  # "piano": note roll + notation track; "guitar": guitar tablature; "both"
     split_guitars: bool = True
     fast: bool = False
@@ -392,7 +403,7 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
         if len(per_pass) == 1:
             out[part] = list(per_pass[0])
         else:
-            out[part] = merge(per_pass, plan[part]["min_votes"])
+            out[part] = merge(per_pass, plan[part]["min_votes"], tol=plan[part].get("tolerance", 0.05))
         if plan[part].get("lowest_only"):
             out[part] = lowest_only(out[part])
         counts = ", ".join(str(len(x)) for x in per_pass)
@@ -761,7 +772,7 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
         path.write_text(tab_text.render(header, labels, part_bm, events, [""] + tab_text.DRUM_LEGEND))
         files.append(path)
 
-    for part, default_program in (("piano", 0), ("synth", 80)):
+    for part, default_program in (("piano", 0), ("synth", 80), ("vocals", 53)):
         for old in out_dir.glob(f"{glob_escape(name)} - {part.capitalize()}*.txt"):
             old.unlink()
         if part not in notes:
@@ -770,8 +781,9 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
         knotes = notes[part]
         part_bm = _part_grid(bm, knotes, shuffle)
         program = keys.program_for(knotes, default_program)
-        sounds = f"Sounds like: {keys.heard_as(knotes)}"
-        if opts.keys_as in ("piano", "both"):
+        sounds = f"Sounds like: {keys.heard_as(knotes)}" if part != "vocals" else "The sung melody"
+        write_as = opts.vocals_as if part == "vocals" else opts.keys_as
+        if write_as in ("piano", "both"):
             pitches_at, new_parts = _keys_part(title, knotes, part_bm, program, two_hands=part == "piano")
             gp_parts += new_parts
             header = base_header + [f"Part: {title}", sounds, note_line,
@@ -779,7 +791,7 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
             path = out_dir / f"{name} - {title}.txt"
             path.write_text(tab_text.render_roll(header, part_bm, pitches_at))
             files.append(path)
-        if opts.keys_as in ("guitar", "both"):
+        if write_as in ("guitar", "both"):
             tuning = fretboard.find_tuning(guitar_tuning or "E Standard", False)
             folded, moved = keys.fold_notes(knotes, tuning.lowest, tuning.strings[-1] + 19)
             labels, events, gp_part, info = _fretted_part(
@@ -835,7 +847,7 @@ def write_midi(path: Path, notes: dict[str, list[TNote]]):
                 counts[n.instrument] = counts.get(n.instrument, 0) + 1
             program = GM_PROGRAMS.get(max(counts, key=counts.get), 30)
             if part in KEY_PARTS:
-                program = keys.program_for(ns, 0 if part == "piano" else 80)
+                program = keys.program_for(ns, {"piano": 0, "vocals": 53}.get(part, 80))
             track.append(mido.Message("program_change", program=program, channel=ch, time=0))
         if not mid.tracks:
             track.append(mido.MetaMessage("set_tempo", tempo=tempo_us, time=0))

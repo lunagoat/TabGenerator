@@ -28,6 +28,7 @@ GM_PROGRAMS = {
     "synth_strings": 50,
     "synth_lead": 80,
     "synth_pad": 88,
+    "voice": 53,
 }
 FRIENDLY = {
     "acoustic_piano": "piano", "electric_piano": "electric piano", "chromatic_percussion": "bells/mallets",
