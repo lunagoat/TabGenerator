@@ -92,7 +92,7 @@ def _spell(bm: BeatMap, start: int, end: int) -> list[int]:
     return out
 
 
-def _make_track(song: gp.Song, number: int, part: GPPart, channel: int) -> gp.Track:
+def _make_track(song: gp.Song, number: int, part: GPPart, channel: int, effect: int) -> gp.Track:
     track = gp.Track(song, number=number, name=part.name[:40], measures=[])
     if part.strings is None:
         track.isPercussionTrack = True
@@ -100,7 +100,7 @@ def _make_track(song: gp.Song, number: int, part: GPPart, channel: int) -> gp.Tr
         track.channel = gp.MidiChannel(channel=9, effectChannel=9, instrument=0)
     else:
         track.strings = [gp.GuitarString(i + 1, v) for i, v in enumerate(reversed(part.strings))]
-        track.channel = gp.MidiChannel(channel=channel, effectChannel=channel + 1, instrument=part.program)
+        track.channel = gp.MidiChannel(channel=channel, effectChannel=effect, instrument=part.program)
         track.fretCount = part.fret_count
     track.indicateTuning = True
     for header in song.measureHeaders:
@@ -188,13 +188,19 @@ def write_gp5(path: str, title: str, artist: str, bm: BeatMap, parts: list[GPPar
         if i > 0 and abs(t - current) >= 2:
             tempo_marks[i] = t
             current = t
-    channel = 0
+    # MIDI has 16 channels, 10 is drums. A track normally gets two (one for
+    # effects); with many tracks they get one each, and beyond 15 they share.
+    free = [c for c in range(16) if c != 9]
+    fretted = sum(1 for p in parts if p.strings is not None)
+    per_track = 2 if fretted * 2 <= len(free) else 1
+    used = 0
     for n, part in enumerate(parts):
-        if part.strings is not None and channel == 9:
-            channel = 10
-        track = _make_track(song, n + 1, part, channel)
+        channel = effect = 9
+        if part.strings is not None:
+            channel = free[(used * per_track) % len(free)]
+            effect = free[(used * per_track + per_track - 1) % len(free)]
+            used += 1
+        track = _make_track(song, n + 1, part, channel, effect)
         _fill_track(part.bm or bm, track, part, tempo_marks if n == 0 else {})
         song.tracks.append(track)
-        if part.strings is not None:
-            channel += 2
     gp.write(song, path, version=(5, 1, 0))

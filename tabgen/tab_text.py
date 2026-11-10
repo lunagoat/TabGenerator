@@ -52,10 +52,13 @@ def render(
     bm: BeatMap,
     events: dict[int, dict[int, str]],
     footer: list[str] | None = None,
+    sparse: bool = False,
 ) -> str:
     """Render a whole part.
 
     `labels` name the lines top to bottom; `events` maps tick -> {line: text}.
+    `sparse`: each system shows only the lines used in it (for a note roll
+    with one line per pitch, where most lines are empty most of the time).
     """
     lab_w = max(len(l) for l in labels)
     labels = [l.rjust(lab_w) for l in labels]
@@ -88,11 +91,11 @@ def render(
                         lines.append(text.center(w, "-"))
                     else:
                         lines.append("-" * w)
-                blocks.append((i + 1, " " * w, lines))
+                blocks.append((i + 1, " " * w, lines, text))
                 i = j
                 continue
         count, lines = _render_bar(bm, bar, n, events)
-        blocks.append((i + 1, count, lines))
+        blocks.append((i + 1, count, lines, None))
         i += 1
 
     out = list(header) + [""]
@@ -103,16 +106,25 @@ def render(
             return
         nums = " " * (lab_w + 1)
         counts = " " * (lab_w + 1)
-        rows = [labels[li] + "|" for li in range(n)]
-        for num, count, lines in system:
+        shown = list(range(n))
+        if sparse:
+            shown = [li for li in range(n)
+                     if any(rest is None and lines[li].strip("-") for _, _, lines, rest in system)]
+            shown = shown or [n // 2]
+        rows = {li: labels[li] + "|" for li in shown}
+        for num, count, lines, rest in system:
             tag = str(num)
             nums += tag + " " * (len(lines[0]) + 1 - len(tag))
             counts += count + " "
-            for li in range(n):
-                rows[li] += lines[li] + "|"
+            for k, li in enumerate(shown):
+                if rest is not None:  # "N bars rest": text on the middle shown line
+                    w = len(lines[0])
+                    rows[li] += (rest.center(w, "-") if k == len(shown) // 2 else "-" * w) + "|"
+                else:
+                    rows[li] += lines[li] + "|"
         out.append(nums.rstrip())
         out.append(counts.rstrip())
-        out.extend(rows)
+        out.extend(rows[li] for li in shown)
         out.append("")
         system.clear()
 
@@ -160,3 +172,26 @@ def drum_line_for(pitch: int) -> tuple[str, str]:
         if pitch in table:
             return label, table[pitch]
     return "PC", "x"
+
+
+# ----------------------------------------------------------------------------
+# Keyboards: a note roll, one line per pitch
+
+_ROLL_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+
+
+def pitch_label(pitch: int) -> str:
+    """Scientific pitch name: 60 -> C4 (middle C)."""
+    return f"{_ROLL_NAMES[pitch % 12]}{pitch // 12 - 1}"
+
+
+def render_roll(header: list[str], bm: BeatMap, pitches_at: dict[int, list[int]], footer: list[str] | None = None) -> str:
+    """Notes as a roll: time runs left to right like a tab, each line is one
+    pitch (highest on top), "o" marks where a note starts. `pitches_at` maps
+    tick -> pitches starting there."""
+    used = sorted({p for ps in pitches_at.values() for p in ps}, reverse=True)
+    if not used:
+        return "\n".join(header + ["", "(no notes were detected for this part)", ""])
+    line_of = {p: i for i, p in enumerate(used)}
+    events = {t: {line_of[p]: "o" for p in ps} for t, ps in pitches_at.items()}
+    return render(header, [pitch_label(p) for p in used], bm, events, footer, sparse=True)

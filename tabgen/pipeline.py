@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import arrange, fretboard, gp_export, rhythm, separate, tab_text
+from . import arrange, fretboard, gp_export, keys, rhythm, separate, tab_text
 from .transcribe import BASSES, DRUMS, GUITARS, SAMPLE_RATE, TNote
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,13 @@ PASSES = {
     "drums": {"stems": ["drums"], "instruments": None},
     "drums@2.5": {"stems": ["drums"], "instruments": None, "shift": 2.5},
     "drums@3.75": {"stems": ["drums"], "instruments": None, "shift": 3.75},
+    "piano": {"stems": ["piano"], "instruments": None},
+    "piano@2.5": {"stems": ["piano"], "instruments": None, "shift": 2.5},
+    "piano@3.75": {"stems": ["piano"], "instruments": None, "shift": 3.75},
+    # Synths have no stem of their own: they are what is left in "other".
+    "synth": {"stems": ["other"], "instruments": None},
+    "synth@2.5": {"stems": ["other"], "instruments": None, "shift": 2.5},
+    "synth@3.75": {"stems": ["other"], "instruments": None, "shift": 3.75},
     # Guitar stem split by where it sits in the stereo mix; used to tell
     # guitar parts apart, not for voting.
     "guitars_left": {"stems": ["guitar"], "instruments": None, "position": "left"},
@@ -49,14 +56,37 @@ PARTS = {
     "guitar": {"passes": ["guitar", "guitar@2.5", "guitar@3.75"], "min_votes": 2},
     "bass": {"passes": ["bass_forced", "bass_forced@2.5"], "min_votes": 2, "lowest_only": True},
     "drums": {"passes": ["drums", "drums@2.5", "drums@3.75"], "min_votes": 2},
+    "piano": {"passes": ["piano", "piano@2.5", "piano@3.75"], "min_votes": 2},
+    "synth": {"passes": ["synth", "synth@2.5", "synth@3.75"], "min_votes": 2},
 }
 # --fast: the best single pass per part.
 FAST_PARTS = {
     "guitar": {"passes": ["guitar"], "min_votes": 1},
     "bass": {"passes": ["bass_forced"], "min_votes": 1, "lowest_only": True},
     "drums": {"passes": ["drums"], "min_votes": 1},
+    "piano": {"passes": ["piano"], "min_votes": 1},
+    "synth": {"passes": ["synth"], "min_votes": 1},
 }
 PART_LABELS = {"guitar": set(GUITARS), "bass": set(BASSES), "drums": {"drums"}}
+# "keys" on the command line means both keyboard parts.
+PART_GROUPS = {"keys": ("piano", "synth")}
+KEY_PARTS = ("piano", "synth")
+# A stem this much quieter than the song holds nothing worth transcribing,
+# and a part with fewer notes than this was not really there.
+SILENT_STEM = 0.02
+MIN_KEY_NOTES = 20
+
+
+def _wanted(part: str, note: TNote) -> bool:
+    """Whether a note transcribed from a part's stem belongs to the part."""
+    if part == "piano":
+        # The separator already says "this is the piano": whatever the model
+        # calls a note (a low one often "bass"), it is the piano playing.
+        return not note.is_drum
+    if part == "synth":
+        # Synth sounds get all sorts of names (guitar, bells, strings...).
+        return not note.is_drum and note.instrument not in PART_LABELS["bass"]
+    return note.instrument in PART_LABELS[part]
 
 GM_PROGRAMS = {
     "acoustic_guitar": 25,
@@ -84,7 +114,8 @@ class Options:
     resplit: bool = False
     retranscribe: bool = False
     out_dir: Path | None = None
-    parts: tuple[str, ...] = ("guitar", "bass", "drums")
+    parts: tuple[str, ...] = ("guitar", "bass", "drums", "piano", "synth")
+    keys_as: str = "piano"  # "piano": note roll + notation track; "guitar": guitar tablature; "both"
     split_guitars: bool = True
     fast: bool = False
     open_folder: bool = True
@@ -160,6 +191,28 @@ def _check_cache_owner(cache: Path, input_path: Path):
     owner.write_text(json.dumps(mark))
 
 
+def _audible_parts(parts, plan, stems, mix16) -> tuple[str, ...]:
+    """The parts whose stems actually contain sound."""
+    import soundfile as sf
+
+    mix_rms = float(np.sqrt(np.mean(mix16.astype(np.float64) ** 2))) + 1e-12
+    level: dict[str, float] = {}
+    keep = []
+    for part in parts:
+        names = {s for ps in plan[part]["passes"] for s in PASSES[ps]["stems"] if s != "mix"}
+        loud = False
+        for s in names:
+            if s not in level:
+                audio, _ = sf.read(str(stems[s]), dtype="float32", always_2d=True)
+                level[s] = float(np.sqrt(np.mean(audio.mean(axis=1).astype(np.float64) ** 2)))
+            loud = loud or level[s] >= SILENT_STEM * mix_rms
+        if loud or not names:
+            keep.append(part)
+        else:
+            print(f"      no {part} in this song (its stem is silent)")
+    return tuple(keep)
+
+
 # ----------------------------------------------------------------------------
 
 
@@ -205,6 +258,8 @@ def run(input_path: Path, opts: Options) -> Path:
             stems = separate_roformer.separate(
                 song_wav, cache, device, opts.resplit, print_progress("separating", "chunks")
             )
+
+    opts = replace(opts, parts=_audible_parts(opts.parts, plan, stems, mix16))
 
     print(f"\n[3/{steps}] Finding the beat")
     beats_file = cache / "beats_v2.json"
@@ -331,8 +386,7 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
 
     out: dict[str, list[TNote]] = {}
     for part in opts.parts:
-        labels = PART_LABELS[part]
-        per_pass = [[n for n in results[p] if n.instrument in labels] for p in plan[part]["passes"]]
+        per_pass = [[n for n in results[p] if _wanted(part, n)] for p in plan[part]["passes"]]
         if part == "drums":
             per_pass = [normalize_drums(ns) for ns in per_pass]
         if len(per_pass) == 1:
@@ -343,9 +397,12 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
             out[part] = lowest_only(out[part])
         counts = ", ".join(str(len(x)) for x in per_pass)
         print(f"      {part}: {len(out[part])} notes agreed on (per pass: {counts})")
+        if part in KEY_PARTS and len(out[part]) < MIN_KEY_NOTES:
+            print(f"      no {part} to speak of: left out")
+            del out[part]
 
     guitar_groups = None
-    if guitar_stereo is not None:
+    if guitar_stereo is not None and "guitar" in out:
         guitar_groups = split_guitars_by_position(
             out["guitar"], guitar_stereo, [results[p] for p in POSITION_PASSES]
         )
@@ -579,6 +636,35 @@ def _drum_part(notes, bm):
     return lines, events, gp_export.GPPart("Drums", gp_events, None, 0, bm=bm)
 
 
+MIDDLE_C = 60
+MIN_HAND_SHARE = 0.15  # each hand needs this share of the notes for a two-track piano
+
+
+def _keys_part(title, notes, bm, program, two_hands=True):
+    """A keyboard part as keyboard music: ({tick: pitches} for the note roll,
+    Guitar Pro tracks to read as notation). A piano that uses both halves of
+    the keyboard gets a right-hand and a left-hand track."""
+    q = rhythm.quantize(bm, notes, bm.subdivisions)
+    by_tick: dict[int, list] = {}
+    for n in q:
+        by_tick.setdefault(n.onset_tick, []).append(n)
+    pitches_at = {t: sorted({n.pitch for n in ns}) for t, ns in by_tick.items()}
+    low = sum(1 for n in q if n.pitch < MIDDLE_C)
+    hands = [("", lambda p: True)]
+    if two_hands and q and MIN_HAND_SHARE <= low / len(q) <= 1 - MIN_HAND_SHARE:
+        hands = [(" (right hand)", lambda p: p >= MIDDLE_C), (" (left hand)", lambda p: p < MIDDLE_C)]
+    parts = []
+    for suffix, mine in hands:
+        gp_events = []
+        for t in sorted(by_tick):
+            group = [n for n in by_tick[t] if mine(n.pitch)]
+            placed = keys.place_chord([n.pitch for n in group])
+            if placed:
+                gp_events.append(gp_export.GPEvent(t, max(n.end_tick for n in group), placed))
+        parts.append(gp_export.GPPart(title + suffix, gp_events, keys.KEYBOARD_STRINGS, program, keys.KEYBOARD_FRETS, bm=bm))
+    return pitches_at, parts
+
+
 def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts, out_dir: Path) -> list[Path]:
     delay = _correct_onset_delay(notes, beats)
     bm = rhythm.build_beatmap(beats, bar_starts, duration)
@@ -608,6 +694,11 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
     # The number of guitar parts can change between runs; clear old ones.
     for old in out_dir.glob(f"{glob_escape(name)} - Guitar*.txt"):
         old.unlink()
+
+    for part in ("Bass", "Drums"):
+        stale = out_dir / f"{name} - {part}.txt"
+        if part.lower() not in notes and stale.is_file():
+            stale.unlink()
 
     guitar_tuning = opts.guitar_tuning
     if "guitar" in notes and not guitar_tuning:
@@ -670,6 +761,45 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
         path.write_text(tab_text.render(header, labels, part_bm, events, [""] + tab_text.DRUM_LEGEND))
         files.append(path)
 
+    for part, default_program in (("piano", 0), ("synth", 80)):
+        for old in out_dir.glob(f"{glob_escape(name)} - {part.capitalize()}*.txt"):
+            old.unlink()
+        if part not in notes:
+            continue
+        title = part.capitalize()
+        knotes = notes[part]
+        part_bm = _part_grid(bm, knotes, shuffle)
+        program = keys.program_for(knotes, default_program)
+        sounds = f"Sounds like: {keys.heard_as(knotes)}"
+        if opts.keys_as in ("piano", "both"):
+            pitches_at, new_parts = _keys_part(title, knotes, part_bm, program, two_hands=part == "piano")
+            gp_parts += new_parts
+            header = base_header + [f"Part: {title}", sounds, note_line,
+                                    'Each line is one pitch (C4 = middle C); "o" marks where a note starts.']
+            path = out_dir / f"{name} - {title}.txt"
+            path.write_text(tab_text.render_roll(header, part_bm, pitches_at))
+            files.append(path)
+        if opts.keys_as in ("guitar", "both"):
+            tuning = fretboard.find_tuning(guitar_tuning or "E Standard", False)
+            folded, moved = keys.fold_notes(knotes, tuning.lowest, tuning.strings[-1] + 19)
+            labels, events, gp_part, info = _fretted_part(
+                f"{title} (guitar tab)", folded, part_bm, False, tuning.name, program, tidy=opts.tidy
+            )
+            gp_part.program = program
+            gp_parts.append(gp_part)
+            header = base_header + [
+                f"Part: {title}, arranged as guitar tablature", sounds, f"Tuning: {info['tuning']}", note_line,
+            ]
+            footer = []
+            if moved:
+                footer.append(f"({moved} notes outside the guitar's range were moved by octaves.)")
+            if info["dropped"]:
+                footer.append(f"({info['dropped']} notes did not fit under one hand and were left out.)")
+            footer += info["tidy"]
+            path = out_dir / f"{name} - {title} (guitar tab).txt"
+            path.write_text(tab_text.render(header, labels, part_bm, events, footer))
+            files.append(path)
+
     if gp_parts:
         path = out_dir / f"{name}.gp5"
         gp_export.write_gp5(str(path), name, "", bm, gp_parts)
@@ -704,6 +834,8 @@ def write_midi(path: Path, notes: dict[str, list[TNote]]):
             for n in ns:
                 counts[n.instrument] = counts.get(n.instrument, 0) + 1
             program = GM_PROGRAMS.get(max(counts, key=counts.get), 30)
+            if part in KEY_PARTS:
+                program = keys.program_for(ns, 0 if part == "piano" else 80)
             track.append(mido.Message("program_change", program=program, channel=ch, time=0))
         if not mid.tracks:
             track.append(mido.MetaMessage("set_tempo", tempo=tempo_us, time=0))

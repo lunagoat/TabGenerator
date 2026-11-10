@@ -1,7 +1,7 @@
 # TabGenerator
 
 Turns any audio file (flac, wav, mp3, m4a, ogg, opus, even video files) into
-**guitar, bass and drum tabs**.
+**guitar, bass and drum tabs**, plus piano and synth parts.
 
 Run from a terminal (quotes are required because the path contains spaces):
 
@@ -21,6 +21,30 @@ can be given at once. Output goes to `Tabs/<song name>/`:
 | `<song>.mid` | Raw (unquantized) MIDI of everything transcribed |
 
 The `.gp5` is the best way to check a tab: play it back alongside the song.
+
+## Piano and synth
+
+Keyboards are found and written out automatically, next to guitar, bass and
+drums: **Piano** comes from the separator's piano stem, **Synth** is
+whatever pitched is left in its "other" stem (synth leads, pads, bells,
+strings; the header says what it sounded like). A part that is not in the
+song is skipped: a silent stem is never transcribed, so a piano piece gets
+no empty guitar tab and a rock song no empty piano part.
+
+`--keys-as` chooses how they are written:
+
+| | Text file | Guitar Pro file |
+|---|---|---|
+| `piano` (default) | a note roll: one line per pitch, time left to right | a track to read as standard notation (a piano gets right-hand and left-hand tracks) |
+| `guitar` | guitar tablature: notes moved by octaves into the guitar's range, then fingered and checked for playability like a guitar part | a normal 6-string tab track that keeps the piano/synth sound |
+| `both` | both files | both sets of tracks |
+
+Guitar Pro 5 files only have stringed tracks, so the notation tracks sit on
+a made-up 7-string instrument tuned in fifths; ignore their tab line and
+read the score. The files open in TuxGuitar: `eval/tuxcheck.sh file.gp5`
+loads one with TuxGuitar's own reader and lists what it finds.
+
+Switching `--keys-as` on a song that was already run takes seconds.
 
 ## How it works
 
@@ -79,7 +103,8 @@ The `.gp5` is the best way to check a tab: play it back alongside the song.
 ## Options
 
 ```
---parts guitar,bass     only some parts
+--parts guitar,bass     only some parts (guitar, bass, drums, piano, synth; keys = piano + synth)
+--keys-as guitar        piano/synth as guitar tablature (or: both)
 --guitar-tuning "Drop D"   override the detected tuning (also --bass-tuning)
 --one-guitar            one guitar tab with everything (no stereo/sound split; saves 3 passes)
 --fast                  one transcription per part instead of voting

@@ -51,10 +51,15 @@ def setup_paths():
 def main():
     use_base_python()
     parser = argparse.ArgumentParser(
-        description="Generate guitar, bass and drum tabs from an audio file.",
+        description="Generate guitar, bass, drum and keyboard tabs from an audio file.",
     )
     parser.add_argument("audio", nargs="*", help="audio file(s): flac, wav, mp3, m4a, ogg, opus, ...")
-    parser.add_argument("--parts", default="guitar,bass,drums", help="comma-separated parts to tab (default: all)")
+    parser.add_argument("--parts", default="guitar,bass,drums,keys",
+                        help="comma-separated parts: guitar, bass, drums, piano, synth, keys (= piano + synth). "
+                             "Default: all; parts that are not in the song are skipped")
+    parser.add_argument("--keys-as", default="piano", choices=["piano", "guitar", "both"],
+                        help="how to write piano/synth parts: piano = note roll and a notation track (default); "
+                             "guitar = guitar tablature, with the notes moved into the guitar's range; both = both")
     parser.add_argument("--guitar-tuning", help='e.g. "Drop D", "Eb Standard" (default: detected)')
     parser.add_argument("--bass-tuning", help='e.g. "E Standard", "5-String B Standard" (default: detected)')
     parser.add_argument("--model", default="large", choices=["small", "medium", "large"],
@@ -80,7 +85,7 @@ def main():
     args = parser.parse_args()
 
     setup_paths()
-    from tabgen.pipeline import PARTS, Options, open_folder, run
+    from tabgen.pipeline import PART_GROUPS, PARTS, Options, open_folder, run
 
     from tabgen.fretboard import find_tuning
 
@@ -91,16 +96,17 @@ def main():
             except ValueError as e:
                 parser.error(f"{flag}: {e}")
 
-    parts = tuple(p.strip().lower() for p in args.parts.split(",") if p.strip())
-    unknown = [p for p in parts if p not in PARTS]
+    asked = [p.strip().lower() for p in args.parts.split(",") if p.strip()]
+    unknown = [p for p in asked if p not in PARTS and p not in PART_GROUPS]
     if unknown:
-        parser.error(f"unknown part(s): {', '.join(unknown)} (choose from {', '.join(PARTS)})")
+        parser.error(f"unknown part(s): {', '.join(unknown)} (choose from {', '.join([*PARTS, *PART_GROUPS])})")
+    parts = tuple(dict.fromkeys(q for p in asked for q in PART_GROUPS.get(p, (p,))))
 
     files = args.audio
     interactive = not files
     if interactive:
         print("\n" + "=" * 60)
-        print("   TAB GENERATOR  (guitar / bass / drums)")
+        print("   TAB GENERATOR  (guitar / bass / drums / keys)")
         print("=" * 60)
         print("\nTip: You can drag and drop a file onto this window.")
         entered = input("Paste audio file path: ").strip().strip('"').strip("'")
@@ -125,6 +131,7 @@ def main():
             batch=max(1, args.batch),
             full_precision=args.full_precision,
             tidy=not args.raw,
+            keys_as=args.keys_as,
         )
         out = run(Path(f), opts)
         if not args.no_open and len(files) == 1:
