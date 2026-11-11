@@ -134,6 +134,7 @@ class FingeringWeights:
     shape_prior: float = 1.0
     string_prior: float = 1.0
     prior: "FingeringPrior | None" = None  # None: the one shipped in tabgen/data
+    model_weight: float = 0.5  # learned string model (fingering_model.py), per unit of -log probability
 
 
 @dataclass
@@ -256,7 +257,7 @@ def default_prior() -> "FingeringPrior | None":
     return _DEFAULT_PRIOR or None
 
 
-def _chord_candidates(pitches, tuning: Tuning, max_fret: int, w: FingeringWeights):
+def _chord_candidates(pitches, tuning: Tuning, max_fret: int, w: FingeringWeights, note_cost=None):
     """All ways to put these pitches on distinct strings, cheapest first.
 
     Returns a list of (static_cost, strings, frets).
@@ -296,6 +297,10 @@ def _chord_candidates(pitches, tuning: Tuning, max_fret: int, w: FingeringWeight
             shape, register = w.prior.costs(tuning, pitches, s, f)
             rescored.append((cost + w.shape_prior * shape + w.string_prior * register, s, f))
         scored = rescored
+    if note_cost is not None and w.model_weight:
+        # The learned model's -log probability of each note's string.
+        scored = [(cost - w.model_weight * sum(float(note_cost[p][st]) for p, st in zip(pitches, s)), s, f)
+                  for cost, s, f in scored]
     scored.sort(key=lambda x: x[0])
     return scored[: w.top_k]
 
@@ -326,7 +331,7 @@ def _static_cost(strings, frets, n_strings, w: FingeringWeights) -> float:
     return cost
 
 
-def _placeable_subset(pitches, tuning: Tuning, max_fret: int, w: FingeringWeights):
+def _placeable_subset(pitches, tuning: Tuning, max_fret: int, w: FingeringWeights, note_cost=None):
     """Drop as few notes as possible so the chord fits on the strings.
 
     Prefers dropping octave doublings, then the notes that would be
@@ -337,7 +342,7 @@ def _placeable_subset(pitches, tuning: Tuning, max_fret: int, w: FingeringWeight
         best = None
         for keep in combinations(range(n), k):
             sub = [pitches[i] for i in keep]
-            cands = _chord_candidates(sub, tuning, max_fret, w)
+            cands = _chord_candidates(sub, tuning, max_fret, w, note_cost)
             if not cands:
                 continue
             dropped = [pitches[i] for i in range(n) if i not in keep]
@@ -360,13 +365,13 @@ class _Layer:
     hand is, and a passage tends to stay in one position like a player would.
     """
 
-    def __init__(self, event: Event, tuning: Tuning, max_fret: int, w: FingeringWeights):
+    def __init__(self, event: Event, tuning: Tuning, max_fret: int, w: FingeringWeights, note_cost=None):
         pitches = event.pitches
-        cands = _chord_candidates(pitches, tuning, max_fret, w)
+        cands = _chord_candidates(pitches, tuning, max_fret, w, note_cost)
         dropped: list[int] = []
         kept = list(pitches)
         if not cands:
-            kept, cands, dropped = _placeable_subset(pitches, tuning, max_fret, w)
+            kept, cands, dropped = _placeable_subset(pitches, tuning, max_fret, w, note_cost)
         self.kept = kept
         self.dropped = dropped
         self.cands = cands
@@ -465,7 +470,12 @@ def assign_frets(
     w = weights or FingeringWeights()
     if w.prior is None and (w.shape_prior or w.string_prior):
         w = replace(w, prior=default_prior())
-    layers = [_Layer(e, tuning, max_fret, w) for e in events]
+    costs = None
+    if w.model_weight:
+        from . import fingering_model
+
+        costs = fingering_model.string_logprobs(events, tuning.strings)
+    layers = [_Layer(e, tuning, max_fret, w, costs[i] if costs else None) for i, e in enumerate(events)]
     # Viterbi over events that have at least one candidate.
     idx = [i for i, l in enumerate(layers) if l.cands]
     back: dict[int, np.ndarray] = {}

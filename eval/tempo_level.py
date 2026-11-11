@@ -24,7 +24,7 @@ PRIOR = env.ROOT / "tabgen" / "data" / "fingering_prior.json"
 def tab_examples():
     """(quarter-note positions of the onsets, bpm) for tracks in simple meter, one tempo."""
     out = []
-    for p in sorted((env.DATA / "tabs").glob("*.jsonl")):
+    for p in [env.DATA / "tabs" / "user.jsonl"]:
         for line in open(p, encoding="utf-8"):
             song = json.loads(line)
             bars = song["bars"]

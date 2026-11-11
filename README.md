@@ -203,15 +203,16 @@ played: on the band mixes (30-second jazz and funk excerpts with almost no
 repeated bars, so they show its cost and not its benefit) guitar F1 goes
 from 0.779 to 0.773 (distorted) and 0.821 to 0.807 (clean).
 
-String/fret choice is learned from human-made tabs: how often tabbers use
-each chord shape, and which string they play a note on at a given height,
-counted in 700 Guitar Pro tracks (mostly 90s rock) and weighed against the
-cost of moving the hand. Given the right notes, the string the tabber chose
-is picked for 77.6% of notes on 132 held-out tabs (68.2% before learning
-from tabs) and for 77.5% on GuitarSet's real players (74.4%). Most of the
-rest are the same notes in another position. `eval/train_fingering.py`
-retrains it from whatever tabs are in `eval/data/tabs/` (see
-`eval/tabdump.sh`).
+String/fret choice is learned from human-made tabs, in two parts: a small
+neural network (`tabgen/fingering_model.py`, trained on about 100,000 guitar
+tracks from Guitar Pro collections) reads each part forwards and backwards
+and says how likely each string is for every note; counted chord shapes and
+hand-movement costs then pick a playable path. Given the right notes, the
+string the tabber chose is picked for 87.9% of notes on 27 Official
+Ultimate Guitar guitar tracks (84.8% without the network) and 83.3% on
+GuitarSet's real players (77.0%). On the full pipeline's own transcriptions
+of the Official songs it is 76.3% (74.6%). `eval/fingering_data.py` and
+`eval/train_fingering_model.py` retrain it.
 
 Speed on an RTX 5070 Ti: about 5.5 minutes for a 5-minute stereo song
 (11 transcriptions), down from roughly 13 minutes for a 4-minute song.

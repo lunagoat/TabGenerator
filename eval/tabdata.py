@@ -74,7 +74,9 @@ def _seconds(bars):
 
 
 def load(paths=None, min_events=20):
-    paths = paths or sorted((env.DATA / "tabs").glob("*.jsonl"))
+    # Default: your own Guitar Pro collection (the big imported sets are
+    # read in chunks by fingering_data.py instead).
+    paths = paths or [env.DATA / "tabs" / "user.jsonl"]
     out = []
     for p in paths:
         for line in open(p, encoding="utf-8"):
