@@ -679,6 +679,8 @@ def _keys_part(title, notes, bm, program, two_hands=True):
 
 def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts, out_dir: Path) -> list[Path]:
     delay = _correct_onset_delay(notes, beats)
+    if opts.collect is not None:
+        opts.collect.append(("notes", None, notes, None))  # every part, before quantizing
     bm = rhythm.build_beatmap(beats, bar_starts, duration)
     all_onsets = np.array([n.onset for ns in notes.values() for n in ns])
     if rhythm.detect_compound(bm, all_onsets):
@@ -755,6 +757,8 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
             "Bass", notes["bass"], part_bm, True, opts.bass_tuning, 33, guitar_tuning, tidy=opts.tidy
         )
         gp_parts.append(gp_part)
+        if opts.collect is not None:
+            opts.collect.append(("Bass", part_bm, gp_part, info))
         header = base_header + ["Part: Bass", f"Tuning: {info['tuning']}", note_line]
         footer = []
         if info["moved"]:

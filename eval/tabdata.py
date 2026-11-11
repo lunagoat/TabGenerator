@@ -37,12 +37,21 @@ def _group(path: str) -> str:
 
 
 def is_guitar(t) -> bool:
-    if t["percussion"] or not t["strings"]:
+    """A guitar track: a guitar sound (MIDI program 24-31, or none set) on 6-8
+    strings. Ultimate Guitar files also hold vocals, keys and chord-diagram
+    tracks ("@$Chords$@") written on six strings; those are not guitars."""
+    if t["percussion"] or not t["strings"] or t["name"].startswith("@$"):
         return False
     n, low, p = len(t["strings"]), min(t["strings"]), t["program"]
-    if 32 <= p <= 39 or low < 33:
+    if low < 33:
         return False  # bass
-    return n in (6, 7, 8) and (24 <= p <= 31 or p < 0 or n >= 6)
+    return n in (6, 7, 8) and (24 <= p <= 31 or p < 0)
+
+
+def is_bass(t) -> bool:
+    if t["percussion"] or not t["strings"] or t["name"].startswith("@$"):
+        return False
+    return 32 <= t["program"] <= 39 or (len(t["strings"]) in (4, 5) and min(t["strings"]) < 33)
 
 
 def _seconds(bars):

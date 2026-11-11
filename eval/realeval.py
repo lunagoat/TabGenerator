@@ -49,6 +49,8 @@ def run_pipeline(song):
     pipeline.run(Path(song["audio"]), opts)
     out = []
     for title, bm, gp, info in collect:
+        if title in ("notes", "Bass"):
+            continue
         for ev in gp.events:
             t = float(bm.beat_to_time(ev.tick / bm.beat_ticks))
             for s, f in ev.notes:
@@ -60,7 +62,7 @@ def run_pipeline(song):
             raw.append([TNote(**n) for n in json.loads(f.read_text())])
     raw = [[n for n in p if n.instrument in pipeline.PART_LABELS["guitar"]] for p in raw]
     voted = ensemble.merge(raw, 2) if len(raw) > 1 else (raw[0] if raw else [])
-    res = {"tab": out, "raw": [[n.onset, n.pitch] for n in voted], "tuning": collect[0][3]["tuning"] if collect else ""}
+    res = {"tab": out, "raw": [[n.onset, n.pitch] for n in voted], "tuning": next((c[3]["tuning"] for c in collect if c[0] not in ("notes", "Bass")), "")}
     cached.write_text(json.dumps(res))
     return res
 
@@ -82,37 +84,45 @@ def chroma_roll(times, pitches, length, shift=0):
 
 def subsequence_dtw(cost):
     """Path through cost [tab frames, audio frames] from the first to the
-    last tab frame, starting and ending anywhere in the audio."""
+    last tab frame, starting and ending anywhere in the audio.
+
+    Steps are (1,1), (1,2) and (2,1): the tab may play at between half and
+    double the recording's speed at any moment, but cannot freeze or race,
+    which an unconstrained warp uses to squash a whole tab into a few
+    matching seconds."""
     n, m = cost.shape
-    D = np.empty((n, m))
-    back = np.zeros((n, m), dtype=np.int8)  # 0 diag, 1 up (tab advances), 2 left (audio advances)
-    D[0] = cost[0]
+    INF = np.inf
+    back = np.zeros((n, m), dtype=np.int8)  # 0: (i-1, j-1)  1: (i-1, j-2)  2: (i-2, j-1)
+    prev2 = np.full(m, INF)
+    prev = cost[0].copy()  # free start anywhere in the audio
     for i in range(1, n):
-        diag = np.r_[np.inf, D[i - 1, :-1]]
-        up = D[i - 1]
-        a = np.minimum(diag, up)
-        choice = np.where(diag <= up, 0, 1)
-        # D[i, j] = c[i, j] + min(a[j], D[i, j-1]), solved with a running minimum
-        C = np.cumsum(cost[i])
-        Cprev = np.r_[0.0, C[:-1]]
-        val = a - Cprev
-        run = np.minimum.accumulate(val)
-        D[i] = C + run
-        from_left = val > run  # the minimum came from further left
-        back[i] = np.where(from_left, 2, choice)
-    j = int(D[-1].argmin())
+        c = cost[i]
+        diag = np.r_[INF, prev[:-1]]
+        skip_audio = np.r_[INF, INF, prev[:-2]] + np.r_[INF, c[:-1]]
+        skip_tab = np.r_[INF, prev2[:-1]] + np.r_[INF, cost[i - 1, :-1]] if i >= 2 else np.full(m, INF)
+        stack = np.stack([diag, skip_audio, skip_tab])
+        choice = stack.argmin(axis=0)
+        cur = c + stack.min(axis=0)
+        back[i] = choice
+        prev2, prev = prev, cur
+    j = int(np.argmin(prev))
+    total = float(prev[j])
     i = n - 1
     path = [(i, j)]
-    while i > 0:
+    while i > 0 and j > 0:
         b = back[i, j]
         if b == 0:
             i, j = i - 1, j - 1
         elif b == 1:
-            i -= 1
+            path.append((i, j - 1))
+            i, j = i - 1, j - 2
         else:
-            j -= 1
+            path.append((i - 1, j))
+            i, j = i - 2, j - 1
+        if i < 0 or j < 0:
+            break
         path.append((i, j))
-    return path[::-1], float(D[-1, j] / n)
+    return path[::-1], total / n
 
 
 def align(tab_notes, bar_times, raw):
