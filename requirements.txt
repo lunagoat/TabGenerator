@@ -1,5 +1,5 @@
-# Installed into ./_packages without dependencies (see setup.sh).
-# PyTorch and Demucs come from StemSplitter/_packages.
+# Installed into ./_packages without their dependencies by install.sh, which
+# installs PyTorch and the few libraries these need first.
 muscriptor==0.3.0
 beat-this==1.1.0
 rotary-embedding-torch==0.9.1

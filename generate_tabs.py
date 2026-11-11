@@ -43,8 +43,7 @@ def setup_paths():
             missing.append(mod)
     if missing:
         print(f"\nMissing Python packages: {', '.join(missing)}")
-        print(f'Run the setup script: "{SCRIPT_DIR / "setup.sh"}"')
-        print("(PyTorch comes from StemSplitter; run its setup.sh if torch or einops is missing.)")
+        print(f'Run the installer: "{SCRIPT_DIR / "install.sh"}"')
         raise SystemExit(1)
 
 
