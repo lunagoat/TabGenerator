@@ -183,10 +183,15 @@ played: on the band mixes (30-second jazz and funk excerpts with almost no
 repeated bars, so they show its cost and not its benefit) guitar F1 goes
 from 0.779 to 0.773 (distorted) and 0.821 to 0.807 (clean).
 
-String/fret choice, scored on GuitarSet's real tabs (given the right
-notes): the string the real player used is chosen for 75% of notes (73%
-for a player the weights were not tuned on), vs 54.5% for "always the lowest
-fret". The rest are playable alternatives in another position.
+String/fret choice is learned from human-made tabs: how often tabbers use
+each chord shape, and which string they play a note on at a given height,
+counted in 700 Guitar Pro tracks (mostly 90s rock) and weighed against the
+cost of moving the hand. Given the right notes, the string the tabber chose
+is picked for 77.6% of notes on 132 held-out tabs (68.2% before learning
+from tabs) and for 77.5% on GuitarSet's real players (74.4%). Most of the
+rest are the same notes in another position. `eval/train_fingering.py`
+retrains it from whatever tabs are in `eval/data/tabs/` (see
+`eval/tabdump.sh`).
 
 Speed on an RTX 5070 Ti: about 5.5 minutes for a 5-minute stereo song
 (11 transcriptions), down from roughly 13 minutes for a 4-minute song.

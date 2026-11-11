@@ -6,7 +6,7 @@ fingerings with a cost for how awkward the shape is, and moving between
 consecutive shapes costs according to how far the fretting hand travels.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 
 import numpy as np
@@ -85,10 +85,13 @@ def find_tuning(name: str, bass: bool) -> Tuning:
 
 @dataclass
 class FingeringWeights:
-    """Costs used by the fingering optimizer, tuned on GuitarSet."""
+    """Costs used by the fingering optimizer.
 
-    # Defaults score 74.8% string accuracy on GuitarSet; the player-held-out
-    # weight search scores 73.1%. See eval/tune_fingering.py for reproduction.
+    Tuned with eval/train_fingering.py on 578 human-made rock tabs: on 132
+    held-out tabs the string the tabber chose is picked for 77.6% of notes
+    (68.2% before learning from tabs), and on GuitarSet for 77.5% (74.4%).
+    """
+
     span: float = 0.3  # per fret of stretch beyond a comfortable 3-fret span
     span_hard: int = 5  # anything wider is not considered
     stretch: float = 1.0  # note one fret past the 4-fret box under the hand
@@ -96,16 +99,21 @@ class FingeringWeights:
     open_bonus: float = 0.0  # open strings need no finger
     open_high_mix: float = 0.0  # open string mixed with a fretted note at fret >= 7
     string_gap: float = 1.2  # per unused string inside a 3+ note chord
-    move: float = 1.5  # per fret the hand moves
+    move: float = 3.0  # per fret the hand moves
     shift: float = 0.0  # any hand movement at all
     ease_time: float = 0.35  # seconds of gap that halve the cost of moving
     string_jump: float = 0.36  # per string crossed between single notes
     ringing_clash: float = 3.0  # new note on a string that is still ringing
     top_k: int = 16
-    run_move: float = 2.0  # extra per-fret movement cost between single notes
-    open_anchor: float = 0.3  # per fret of hand position above 2 while an open string is played
+    run_move: float = 4.0  # extra per-fret movement cost between single notes
+    open_anchor: float = 0.0  # per fret of hand position above 2 while an open string is played
     index_reach: float = 0.0  # per fret between the index finger and the lowest fretted note
     rest_ease: float = 0.5  # blend onset spacing (0) with actual note-off rest (1)
+    # Learned from human-made tabs (see FingeringPrior): how strongly to
+    # prefer chord shapes, and strings for single notes, that tabbers use.
+    shape_prior: float = 1.0
+    string_prior: float = 1.0
+    prior: "FingeringPrior | None" = None  # None: the one shipped in tabgen/data
 
 
 @dataclass
@@ -123,6 +131,108 @@ class Fingering:
     frets: tuple[int, ...]
     pitches: tuple[int, ...]
     dropped: tuple[int, ...] = ()  # pitches that could not be placed
+
+
+class FingeringPrior:
+    """How often human tabbers put notes where: counts learned from Guitar
+    Pro files (eval/train_fingering.py).
+
+    - chord shapes: for a set of pitches (as intervals above the lowest), how
+      often each shape (strings and frets relative to the lowest string and
+      fret) was used, per tuning layout (the intervals between the strings)
+      with a fallback over all layouts;
+    - register: for a pitch at a given height above the lowest open string,
+      how often each string was used.
+
+    Only ratios between the options for one chord matter, so a cost is
+    -log(count + smoothing).
+    """
+
+    SMOOTH = 0.5
+
+    def __init__(self, shapes=None, shapes_any=None, strings=None):
+        self.shapes = shapes or {}  # (layout, intervals) -> {shape: count}
+        self.shapes_any = shapes_any or {}  # intervals -> {shape: count}
+        self.strings = strings or {}  # (n_strings, height) -> {string: count}
+
+    @staticmethod
+    def layout(tuning: Tuning) -> str:
+        return ",".join(str(b - a) for a, b in zip(tuning.strings, tuning.strings[1:]))
+
+    @staticmethod
+    def shape_key(pitches, strings, frets):
+        """(intervals, shape) as strings, both relative so they transpose."""
+        order = sorted(range(len(pitches)), key=lambda i: pitches[i])
+        p0, s0 = pitches[order[0]], min(strings)
+        fretted = [f for f in frets if f > 0]
+        f0 = min(fretted) if fretted else 0
+        intervals = ".".join(str(pitches[i] - p0) for i in order)
+        shape = ".".join(f"{strings[i] - s0}:{frets[i] - f0 if frets[i] > 0 else 'o'}" for i in order)
+        return intervals, shape
+
+    def add(self, tuning: Tuning, pitches, strings, frets):
+        if len(pitches) == 1:
+            key = f"{len(tuning.strings)}|{pitches[0] - tuning.lowest}"
+            d = self.strings.setdefault(key, {})
+            d[str(strings[0])] = d.get(str(strings[0]), 0) + 1
+            return
+        intervals, shape = self.shape_key(pitches, strings, frets)
+        for table, key in ((self.shapes, f"{self.layout(tuning)}|{intervals}"), (self.shapes_any, intervals)):
+            d = table.setdefault(key, {})
+            d[shape] = d.get(shape, 0) + 1
+        # The lowest note's string says where on the neck the chord sits.
+        low = min(range(len(pitches)), key=lambda i: pitches[i])
+        key = f"{len(tuning.strings)}|{pitches[low] - tuning.lowest}"
+        d = self.strings.setdefault(key, {})
+        d[str(strings[low])] = d.get(str(strings[low]), 0) + 1
+
+    def costs(self, tuning: Tuning, pitches, strings, frets) -> tuple[float, float]:
+        """(shape cost, register cost) of one candidate."""
+        import math
+
+        low = min(range(len(pitches)), key=lambda i: pitches[i])
+        reg = self.strings.get(f"{len(tuning.strings)}|{pitches[low] - tuning.lowest}", {})
+        register = -math.log(reg.get(str(strings[low]), 0) + self.SMOOTH)
+        if len(pitches) == 1:
+            return 0.0, register
+        intervals, shape = self.shape_key(pitches, strings, frets)
+        table = self.shapes.get(f"{self.layout(tuning)}|{intervals}")
+        if not table or sum(table.values()) < 5:
+            table = self.shapes_any.get(intervals, {})
+        return -math.log(table.get(shape, 0) + self.SMOOTH), register
+
+    def to_json(self) -> dict:
+        return {"shapes": self.shapes, "shapes_any": self.shapes_any, "strings": self.strings}
+
+    @classmethod
+    def from_json(cls, d: dict) -> "FingeringPrior":
+        return cls(d["shapes"], d["shapes_any"], d["strings"])
+
+    def pruned(self, min_count: int = 2) -> "FingeringPrior":
+        """Without shapes seen fewer than `min_count` times (smaller file)."""
+        def prune(t):
+            out = {}
+            for k, d in t.items():
+                d2 = {s: c for s, c in d.items() if c >= min_count}
+                if d2:
+                    out[k] = d2
+            return out
+        return FingeringPrior(prune(self.shapes), prune(self.shapes_any), self.strings)
+
+
+_DEFAULT_PRIOR = None
+
+
+def default_prior() -> "FingeringPrior | None":
+    """The prior shipped in tabgen/data/fingering_prior.json, if present."""
+    global _DEFAULT_PRIOR
+    if _DEFAULT_PRIOR is None:
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).with_name("data") / "fingering_prior.json"
+        _DEFAULT_PRIOR = FingeringPrior.from_json(json.loads(path.read_text())) if path.is_file() else False
+    return _DEFAULT_PRIOR or None
 
 
 def _chord_candidates(pitches, tuning: Tuning, max_fret: int, w: FingeringWeights):
@@ -159,6 +269,12 @@ def _chord_candidates(pitches, tuning: Tuning, max_fret: int, w: FingeringWeight
 
     rec(0, 0, [], [], 99, -1)
     scored = [(_static_cost(s, f, n_strings, w), s, f) for s, f in results]
+    if w.prior is not None and (w.shape_prior or w.string_prior):
+        rescored = []
+        for cost, s, f in scored:
+            shape, register = w.prior.costs(tuning, pitches, s, f)
+            rescored.append((cost + w.shape_prior * shape + w.string_prior * register, s, f))
+        scored = rescored
     scored.sort(key=lambda x: x[0])
     return scored[: w.top_k]
 
@@ -326,6 +442,8 @@ def assign_frets(
 ) -> tuple[list[Fingering], float]:
     """Choose a string/fret for every note. Returns (fingerings, total cost)."""
     w = weights or FingeringWeights()
+    if w.prior is None and (w.shape_prior or w.string_prior):
+        w = replace(w, prior=default_prior())
     layers = [_Layer(e, tuning, max_fret, w) for e in events]
     # Viterbi over events that have at least one candidate.
     idx = [i for i, l in enumerate(layers) if l.cands]
