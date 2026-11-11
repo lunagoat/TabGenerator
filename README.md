@@ -96,11 +96,10 @@ seconds.
    into something a player would write down.
    - A line another guitar plays on top of a riff is moved out of the riff's
      part (the riff comes round with and without it).
-   - Bars that are clearly the same riff are compared: a note only one
-     repeat has is dropped, a note nearly all repeats have is filled in
-     where it went missing.
-   - A strum that is nearly a chord played all around it is written as that
-     chord, so the same chord is the same shape every time.
+   - Bars that are clearly the same riff are compared: a doubtful note
+     (not every transcription pass heard it) that only one repeat has is
+     dropped, a note practically all repeats have is filled in where it
+     went missing.
    - High notes that are overtones of a distorted low string are removed.
    - After fingering, a playability check leaves out notes that would need
      the hand five or more frets away for a single strum, and counts the
@@ -109,10 +108,13 @@ seconds.
    Each tab ends with a note of what was changed. `--raw` turns all of it
    off and writes the notes exactly as transcribed.
 7. **Tuning detection** (E standard, Eb, Drop D, D, Drop C#, Drop C, C, B,
-   7-string, 5-string bass, ...) from the lowest notes played and how
-   naturally the part fits each tuning. Distorted power chords make ghost
-   notes an octave below their root; those are ignored. The bass follows the
-   guitar's tuning unless its notes clearly need a lower one.
+   7-string, 5-string bass, capo 1-7, ...) for the band as a whole: from
+   the lowest notes played, how naturally the guitar part fits each tuning,
+   and how low the bass goes. A guitar that never touches its lowest string
+   sounds the same in E and Eb standard; a bass that plays a low Eb settles
+   it. Distorted power chords make ghost notes an octave below their root;
+   those are ignored. The bass gets the guitar's tuning unless its notes
+   clearly need a lower one.
 8. **Separate guitar parts**: the guitar stem is split by stereo position
    (left / center / right) and each side is transcribed on its own; each
    note goes to the part whose side it was heard on. A riff double-tracked
@@ -133,7 +135,7 @@ seconds.
 --keys-as guitar        piano/synth as guitar tablature (or: both)
 --guitar-tuning "Drop D"   override the detected tuning (also --bass-tuning); also open tunings
                         ("Open G", "Open D", "DADGAD", "Open E", "Open G, low G") and a capo
-                        ("E Standard, capo 2"), which detection rarely picks on its own
+                        ("E Standard, capo 2"); open tunings are never detected, a capo sometimes
 --one-guitar            one guitar tab with everything (no stereo/sound split; saves 3 passes)
 --fast                  one transcription per part instead of voting
 --separator demucs      Demucs htdemucs_6s (via StemSplitter) instead of BS-RoFormer
@@ -141,6 +143,7 @@ seconds.
 --model medium          faster, less accurate (default: large)
 --beam 4                beam search (much slower; made no measurable difference in testing)
 --raw                   notes as transcribed: no tidying, no playability check
+--full-speed            use every CPU core and the whole GPU (see "While it runs")
 --resplit               redo stem separation even if stems exist
 --retranscribe          ignore cached transcriptions
 -o DIR                  output folder
@@ -149,6 +152,15 @@ seconds.
 
 Intermediate results (decoded audio, stems, beats, notes) are cached in
 `.cache/`, so re-running a song with different tab options is instant.
+
+## While it runs
+
+The models would happily take every CPU core and the whole GPU for
+minutes, which makes the desktop stutter or freeze. By default TabGenerator
+therefore runs at low priority, uses at most half the CPU cores, and pauses
+its GPU work for a few milliseconds many times a second so that the desktop
+and other programs get their turn. That costs about a fifth in speed;
+`--full-speed` (or `TABGEN_FULL_SPEED=1`) turns it off.
 
 ## Setup details
 
@@ -198,21 +210,55 @@ listening to the guitar stem alone instead of the whole band 0.638 -> 0.717,
 voting over shifted passes -> 0.778. For drums on MDB: stems 0.824 -> 0.847,
 shifted passes -> 0.860.
 
-Tidying trades a little of that note score for tabs that can be read and
-played: on the band mixes (30-second jazz and funk excerpts with almost no
-repeated bars, so they show its cost and not its benefit) guitar F1 goes
-from 0.779 to 0.773 (distorted) and 0.821 to 0.807 (clean).
+Tidying costs no note accuracy: on the band mixes guitar F1 is the same
+before and after (0.779 distorted, 0.821 clean), and against Official tabs
+of real recordings 0.729 after against 0.730 before
+(`eval/eval_tidy.py`). An earlier version also rewrote strums as the chord
+shape played around them and dropped any note only one repeat of a riff
+had; against the Official tabs that put in more wrong notes than right
+ones (guitar precision 0.76 -> 0.72) and took out real ones, so it is gone.
 
 String/fret choice is learned from human-made tabs, in two parts: a small
-neural network (`tabgen/fingering_model.py`, trained on about 100,000 guitar
-tracks from Guitar Pro collections) reads each part forwards and backwards
-and says how likely each string is for every note; counted chord shapes and
-hand-movement costs then pick a playable path. Given the right notes, the
-string the tabber chose is picked for 87.9% of notes on 27 Official
-Ultimate Guitar guitar tracks (84.8% without the network) and 83.3% on
-GuitarSet's real players (77.0%). On the full pipeline's own transcriptions
-of the Official songs it is 76.3% (74.6%). `eval/fingering_data.py` and
-`eval/train_fingering_model.py` retrain it.
+neural network (`tabgen/fingering_model.py`; one for guitar trained on
+about 100,000 guitar tracks from Guitar Pro collections, one for bass
+trained on 45,000 bass tracks) reads each part forwards and backwards and
+says how likely each string is for every note; counted chord shapes and
+hand-movement costs then pick a playable path. The guitar network is
+trained mostly on tabs made to look like transcriptions (notes missing,
+octave and neighbour ghosts added, lengths off), because that is what it
+is given. Share of notes put on the string the tabber chose:
+
+| | Guitar | Bass |
+|---|---|---|
+| The pipeline's own transcriptions, tab's tuning given (38 real songs; bass: 9) | **81.8%** (79.7% with the network trained on clean tabs, 75.9% without a network) | **92.0%** (83.2% without a network) |
+| Given the right notes: Official Ultimate Guitar tabs | 87.4% | 86.7% (78.9%) |
+| Given the right notes: GuitarSet's real players | 84.2% | |
+
+`eval/eval_fingering_real.py` measures the first row, and
+`eval/fingering_data.py` and `eval/train_fingering_model.py` retrain the
+networks (the bass one shipped is from
+`--kind bass --noise 0.5 --dropout 0.1 --steps 30000`).
+
+Against Official Ultimate Guitar tabs of nine real recordings
+(`eval/official.py`; onsets within 100 ms after aligning the tab to the
+recording):
+
+| | Notes found (F1) | Written tab (F1) | Same string | Same fret |
+|---|---|---|---|---|
+| Guitar | 0.72 | 0.72 | 75% | 69% |
+| Bass | 0.76 | 0.76 | 88% | 81% |
+| Drums | 0.78 | | | |
+| Vocals (melody) | 0.37 | | | |
+
+One of the nine (Today) pulls the string and fret numbers down for a
+reason that is not a mistake: its Official tab is written in E standard,
+the bass on the recording plays a low Eb that an E-standard bass does not
+have, and TabGenerator writes the song in Eb standard. Without it, guitar
+is at 79% / 78%.
+
+Tuning detection gets the tab's guitar tuning for 33 of 39 real recordings
+(`eval/eval_tuning_band.py`); the misses are three songs played with a
+capo, two drop-tuned ones and Today.
 
 Speed on an RTX 5070 Ti: about 5.5 minutes for a 5-minute stereo song
 (11 transcriptions), down from roughly 13 minutes for a 4-minute song.
@@ -227,8 +273,11 @@ test data is downloaded separately into `eval/data/`.
 
 - No playing techniques (bends, slides, hammer-ons, palm mutes, harmonics);
   the tabs show which notes are played, where and when.
-- String/fret choice is inferred, not heard. It matches the real player's
-  choice for about 3 notes in 4 on GuitarSet; the rest are playable
-  alternatives in another position.
-- Capo and unusual open tunings are not detected; use `--guitar-tuning`.
+- String/fret choice is inferred, not heard. It matches the tabber's choice
+  for about 4 notes in 5; the rest are playable alternatives in another
+  position.
+- Open tunings and a capo are not detected (the notes alone fit standard
+  tuning just as well); use `--guitar-tuning`.
+- The same note picked again while it still rings is often heard as one
+  long note, and a ride or a ridden crash cymbal often as a hi-hat.
 - Songs without a steady pulse (rubato, free time) get messy bar lines.

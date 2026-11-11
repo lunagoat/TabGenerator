@@ -5,5 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 for p in (ROOT.parent / "StemSplitter" / "_packages", ROOT / "_packages", ROOT):
     sys.path.insert(0, str(p))
+import tabgen  # noqa: E402,F401  (caps CPU threads before numpy and torch load; see tabgen/polite.py)
+
 DATA = ROOT / "eval" / "data"
 WORK = ROOT / "eval" / "work"

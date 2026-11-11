@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .polite import Breather
+
 NAME = "bs_roformer_sw"
 HF_REPO = "Blakus/bs_roformer_sw_6stem"
 HF_FILE = "BS-Rofo-SW-Fixed.ckpt"
@@ -86,6 +88,7 @@ def demix(model, audio: np.ndarray, device: str, overlap: int = 2, progress=None
     fade = CHUNK // 10
     starts = list(range(0, total, step))
     use_amp = device.startswith("cuda")
+    breathe = Breather(device)
     for i, start in enumerate(starts):
         part = mix[:, start: start + CHUNK]
         length = part.shape[1]
@@ -99,6 +102,7 @@ def demix(model, audio: np.ndarray, device: str, overlap: int = 2, progress=None
         w = _fade_window(CHUNK, fade, i == 0, start + CHUNK >= total)
         out[:, :, start: start + length] += est[:, :, :length] * w[:length]
         weight[start: start + length] += w[:length]
+        breathe()
         if progress:
             progress(i + 1, len(starts))
     out /= weight.clamp_min(1e-8)

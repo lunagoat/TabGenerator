@@ -10,30 +10,48 @@ it can tell an open-position riff from the same notes higher up the neck.
 
 fretboard.assign_frets uses these probabilities as one of its costs; the
 hand-movement search still decides, so the result stays playable.
+
+There are two sets of weights, one for guitars and one for basses.
 """
 
 from pathlib import Path
 
 import numpy as np
 
-WEIGHTS = Path(__file__).with_name("data") / "fingering_model.pt"
+DATA = Path(__file__).with_name("data")
+WEIGHTS = {"guitar": DATA / "fingering_model.pt", "bass": DATA / "fingering_model_bass.pt"}
+STRING_COUNTS = {"guitar": (6, 7), "bass": (4, 5, 6)}
 MAX_STRINGS = 7
 MAX_HEIGHT = 96
 MAX_FRET = 24
+# Intervals between neighbouring strings -> layout number.
 LAYOUTS = {
-    (5, 5, 5, 4, 5): 0,  # standard (E, Eb, D, C# ... standard)
-    (7, 5, 5, 4, 5): 1,  # drop
-    (5, 5, 5, 5, 4, 5): 2,  # 7-string standard
-    (7, 5, 5, 5, 4, 5): 3,  # 7-string drop
+    "guitar": {
+        (5, 5, 5, 4, 5): 0,  # standard (E, Eb, D, C# ... standard)
+        (7, 5, 5, 4, 5): 1,  # drop
+        (5, 5, 5, 5, 4, 5): 2,  # 7-string standard
+        (7, 5, 5, 5, 4, 5): 3,  # 7-string drop
+    },
+    "bass": {
+        (5, 5, 5): 0,  # standard
+        (7, 5, 5): 1,  # drop
+        (5, 5, 5, 5): 2,  # 5-string
+        (5, 5, 5, 5, 5): 3,  # 6-string
+    },
 }
 N_LAYOUTS = 5  # 4 = anything else (open tunings, ...)
+BASS_BELOW = 33  # an instrument whose lowest string is below A1 is a bass
 DT_EDGES = np.array([0.0, 0.03, 0.06, 0.09, 0.12, 0.16, 0.2, 0.25, 0.32, 0.4, 0.5, 0.65, 0.8, 1.0, 1.5, 2.5])
 DUR_EDGES = np.array([0.0, 0.05, 0.08, 0.11, 0.15, 0.2, 0.25, 0.32, 0.4, 0.5, 0.65, 0.8, 1.0, 1.4, 2.0, 3.0])
 
 
-def layout_id(opens) -> int:
+def kind_of(opens) -> str:
+    return "bass" if min(opens) < BASS_BELOW else "guitar"
+
+
+def layout_id(opens, kind: str | None = None) -> int:
     opens = sorted(opens)
-    return LAYOUTS.get(tuple(b - a for a, b in zip(opens, opens[1:])), 4)
+    return LAYOUTS[kind or kind_of(opens)].get(tuple(b - a for a, b in zip(opens, opens[1:])), 4)
 
 
 def bucket(x, edges):
@@ -51,7 +69,8 @@ def string_mask(height, opens):
     return mask
 
 
-def build(torch):
+def build(torch, dropout: float = 0.1):
+    """The network class; `dropout` only matters for training."""
     nn = torch.nn
 
     class Net(nn.Module):
@@ -64,39 +83,39 @@ def build(torch):
             self.dt = nn.Embedding(len(DT_EDGES), 8)
             self.dur = nn.Embedding(len(DUR_EDGES), 8)
             self.inp = nn.Linear(48 + 8 * 5, 128)
-            self.gru = nn.GRU(128, hidden, num_layers=2, batch_first=True, bidirectional=True, dropout=0.1)
+            self.drop = nn.Dropout(dropout)
+            self.gru = nn.GRU(128, hidden, num_layers=2, batch_first=True, bidirectional=True, dropout=dropout)
             self.out = nn.Sequential(nn.Linear(2 * hidden + 48, 128), nn.GELU(), nn.Linear(128, MAX_STRINGS))
 
         def forward(self, height, size, index, layout, dt, dur):
             h = self.height(height.clamp(0, MAX_HEIGHT - 1))
             x = torch.cat([h, self.size(size.clamp(0, 7)), self.index(index.clamp(0, 7)), self.layout(layout),
                            self.dt(dt), self.dur(dur)], dim=-1)
-            y, _ = self.gru(torch.relu(self.inp(x)))
-            return self.out(torch.cat([y, h], dim=-1))
+            y, _ = self.gru(self.drop(torch.relu(self.inp(x))))
+            return self.out(torch.cat([self.drop(y), h], dim=-1))
 
     return Net
 
 
-_MODEL = None
+_MODELS: dict = {}
 
 
-def load():
+def load(kind: str = "guitar"):
     """The trained model on the CPU, or None if there is none (or no torch)."""
-    global _MODEL
-    if _MODEL is None:
-        _MODEL = False
-        if WEIGHTS.is_file():
+    if kind not in _MODELS:
+        _MODELS[kind] = None
+        if WEIGHTS[kind].is_file():
             try:
                 import torch
 
                 net = build(torch)()
-                state = torch.load(str(WEIGHTS), map_location="cpu", weights_only=True)
+                state = torch.load(str(WEIGHTS[kind]), map_location="cpu", weights_only=True)
                 net.load_state_dict({k: v.float() for k, v in state.items()})
                 net.eval()
-                _MODEL = (torch, net)
-            except Exception:
-                _MODEL = False
-    return _MODEL or None
+                _MODELS[kind] = (torch, net)
+            except Exception as e:
+                print(f"      (fingering model not used: {e})")
+    return _MODELS[kind]
 
 
 def features(events, opens):
@@ -118,14 +137,15 @@ def features(events, opens):
 
 def string_logprobs(events, opens) -> list | None:
     """Per event, {pitch: log-probability per string (lowest first)}; None without a model."""
-    m = load()
-    if m is None or not events or len(opens) not in (6, 7):
+    kind = kind_of(opens)
+    m = load(kind)
+    if m is None or not events or len(opens) not in STRING_COUNTS[kind]:
         return None
     torch, net = m
     height, size, index, dt, dur = features(events, opens)
     padded = list(sorted(opens)) + [0] * (MAX_STRINGS - len(opens))
     mask = string_mask(height, padded)
-    lay = np.full(len(height), layout_id(opens))
+    lay = np.full(len(height), layout_id(opens, kind))
     t = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.long)[None]
     with torch.inference_mode():
         logits = net(t(np.clip(height, 0, MAX_HEIGHT - 1)), t(size), t(index), t(lay), t(dt), t(dur))[0].numpy()

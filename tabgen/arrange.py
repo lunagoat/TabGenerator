@@ -10,9 +10,9 @@ of that as a mess that nobody could play. This module tidies it up:
 1. `split_layers`: a line that another guitar plays on top of a riff is
    taken out of the riff's part.
 2. `unify_repeats`: bars that are clearly the same riff are compared. A note
-   only one of them has is dropped; a note nearly all of them have is
-   restored where it went missing. Songs repeat, and that is the best
-   evidence there is about what the riff really is.
+   only one of them has, and that not every transcription pass heard, is
+   dropped; a note nearly all of them have is restored where it went
+   missing.
 3. `remove_overtones`: high notes that are a harmonic of a lower note in the
    same strum (distorted guitar only).
 4. `check_playable` (after string/fret positions are chosen): what one hand
@@ -29,8 +29,16 @@ from .rhythm import BeatMap, QNote
 
 SAME_RIFF = 0.5  # bars sharing this much (Jaccard) are repeats of one riff
 MIN_REPEATS = 3
-DROP_SHARE = 0.34  # in at most this share of the repeats: a slip, dropped
-ADD_SHARE = 0.75  # in at least this share: part of the riff, restored
+# Measured against Official tabs of real recordings (eval/eval_tidy.py), the
+# transcription is more often right than its neighbours' consensus: a one-off
+# note is usually a real variation, so only doubtful ones are dropped, and a
+# note is only filled in when practically every repeat has it. (Rewriting
+# strums as the chord shape played around them was dropped for the same
+# reason: it put in more wrong notes than right ones.)
+DROP_SHARE = 0.34  # in at most this share of the repeats and not heard by every pass: a slip, dropped
+DROP_SHARE_SURE = -1.0  # ... for a note every transcription pass heard: never
+SURE = 0.99
+ADD_SHARE = 0.9  # in at least this share: part of the riff, restored
 
 
 @dataclass
@@ -42,7 +50,6 @@ class Report:
     dropped: int = 0
     added: int = 0
     overtones: int = 0
-    reshaped: int = 0
     out_of_reach: int = 0
     hard_jumps: int = 0  # fast position changes left in the tab
 
@@ -55,8 +62,6 @@ class Report:
             )
         if self.overtones:
             out.append(f"({self.overtones} overtone ghosts of lower notes were left out.)")
-        if self.reshaped:
-            out.append(f"({self.reshaped} strums were nearly a chord played all around them and were written as that chord.)")
         if self.out_of_reach:
             out.append(f"({self.out_of_reach} notes out of the hand's reach were left out.)")
         if self.hard_jumps:
@@ -135,7 +140,8 @@ def unify_repeats(notes: list[QNote], bm: BeatMap, report: Report | None = None,
             report.bars += n
             for m in members:
                 for item in list(per_seg[m]):
-                    if counts[item] <= DROP_SHARE * n:
+                    share = DROP_SHARE if per_seg[m][item].conf < SURE else DROP_SHARE_SURE
+                    if counts[item] <= share * n:
                         del per_seg[m][item]
                         report.dropped += 1
             for item, c in counts.items():
@@ -194,75 +200,6 @@ def remove_overtones(notes: list[QNote], report: Report | None = None) -> list[Q
                     report.overtones += 1
             else:
                 out.append(q)
-    out.sort(key=lambda q: (q.onset_tick, q.pitch))
-    return out
-
-
-# ----------------------------------------------------------------------------
-# Chords
-
-CHORD_WINDOW_S = 60.0  # a song keeps its chord shapes: look this many seconds either side
-CHORD_MIN_COUNT = 3
-CHORD_MAJORITY = 2.0  # the common shape must be this many times as frequent
-
-
-def regularize_chords(notes: list[QNote], report: Report | None = None) -> list[QNote]:
-    """A strum that is nearly a chord played all around it becomes that chord.
-
-    When a chord is strummed over and over, the model hears it complete on
-    most strums, loses a note on some and adds a stray one on others. A
-    strum of two or more notes that shares more than half its notes with a
-    shape that is at least twice as common around it (and played at least
-    three times) is written as that shape, so the same chord is the same
-    shape every time. Single notes are left alone, and so are two shapes
-    that are both common: a song may well use both.
-    """
-    by_tick: dict[int, list[QNote]] = {}
-    for q in notes:
-        by_tick.setdefault(q.onset_tick, []).append(q)
-    ticks = sorted(by_tick)
-    if not ticks:
-        return notes
-    times = np.array([min(q.onset for q in by_tick[t]) for t in ticks])
-    shapes = [frozenset(q.pitch for q in by_tick[t]) for t in ticks]
-    out: list[QNote] = []
-    counts: Counter = Counter()
-    lo = hi = 0
-    for i, t in enumerate(ticks):
-        while hi < len(ticks) and times[hi] <= times[i] + CHORD_WINDOW_S:
-            counts[shapes[hi]] += 1
-            hi += 1
-        while times[lo] < times[i] - CHORD_WINDOW_S:
-            counts[shapes[lo]] -= 1
-            lo += 1
-        s = shapes[i]
-        group = by_tick[t]
-        best = None
-        if len(s) >= 2:
-            own = counts[s]
-            for shape, c in counts.items():
-                if len(shape) < 2 or shape == s or c < max(CHORD_MIN_COUNT, CHORD_MAJORITY * own):
-                    continue
-                sim = _jaccard(s, shape)
-                if sim > 0.5 and (best is None or (sim, c) > best[:2]):
-                    best = (sim, c, shape)
-        if best is None and len(s) >= 2:
-            # Not a near-copy of anything much more common; but it may be a
-            # chord played around here with one note lost.
-            own = counts[s]
-            for shape, c in counts.items():
-                if len(shape) == len(s) + 1 and s < shape and c >= max(CHORD_MIN_COUNT, own / 3):
-                    if best is None or c > best[1]:
-                        best = (1.0, c, shape)
-        if best is None:
-            out.extend(group)
-            continue
-        target = best[2]
-        longest = max(group, key=lambda q: q.end_tick)
-        out.extend(q for q in group if q.pitch in target)
-        out.extend(replace(longest, pitch=p) for p in target - s)
-        if report is not None:
-            report.reshaped += 1
     out.sort(key=lambda q: (q.onset_tick, q.pitch))
     return out
 

@@ -9,10 +9,9 @@ each ensemble size, the best min_votes), using the cached transcriptions.
 import sys
 
 import env  # noqa
-import numpy as np
 
 import datasets
-from harness import _path, mean_prf, part_notes, prf, run_passes
+from harness import mean_prf, part_notes, prf, run_passes
 from tabgen import ensemble
 
 

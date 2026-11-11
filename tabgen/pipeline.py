@@ -4,15 +4,14 @@ import json
 import shutil
 from glob import escape as glob_escape
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
-from . import arrange, fretboard, gp_export, keys, rhythm, separate, tab_text
-from .transcribe import BASSES, DRUMS, GUITARS, SAMPLE_RATE, TNote
+from . import arrange, fretboard, gp_export, keys, polite, rhythm, separate, tab_text
+from .transcribe import BASSES, GUITARS, SAMPLE_RATE, TNote
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE_VERSION = 2
@@ -211,7 +210,7 @@ def _audible_parts(parts, plan, stems, mix16) -> tuple[str, ...]:
     level: dict[str, float] = {}
     keep = []
     for part in parts:
-        names = {s for ps in plan[part]["passes"] for s in PASSES[ps]["stems"] if s != "mix"}
+        names = {s for ps in plan[part]["passes"] for s in PASSES[ps]["stems"]}
         loud = False
         for s in names:
             if s not in level:
@@ -228,17 +227,30 @@ def _audible_parts(parts, plan, stems, mix16) -> tuple[str, ...]:
 # ----------------------------------------------------------------------------
 
 
-def run(input_path: Path, opts: Options) -> Path:
+@dataclass
+class Analysis:
+    """What was heard in a song, before any of it is written down."""
+
+    name: str
+    input_path: Path
+    notes: dict  # part -> [TNote]
+    guitar_groups: list | None  # guitar notes by stereo position (None: not split)
+    beats: np.ndarray
+    bar_starts: np.ndarray
+    duration: float
+    opts: Options  # with the parts that are really in the song
+
+
+def analyse(input_path: Path, opts: Options, steps: int = 4) -> Analysis:
+    """Decode, split into stems, find the beat and transcribe (all cached)."""
+    polite.apply()
     input_path = input_path.expanduser().resolve()
     if not input_path.is_file():
         raise SystemExit(f"File not found: {input_path}")
     name = input_path.stem
     cache = ROOT / ".cache" / name
     cache.mkdir(parents=True, exist_ok=True)
-    out_dir = opts.out_dir or (ROOT / "Tabs" / name)
-    out_dir.mkdir(parents=True, exist_ok=True)
     device = _device(opts)
-    steps = 5
 
     print(f"\n[1/{steps}] Decoding {input_path.name}")
     _check_cache_owner(cache, input_path)
@@ -250,7 +262,7 @@ def run(input_path: Path, opts: Options) -> Path:
     print(f"      {duration / 60:.0f}:{duration % 60:04.1f} long")
 
     plan = FAST_PARTS if opts.fast else PARTS
-    needed = {s for p in opts.parts for ps in plan[p]["passes"] for s in PASSES[ps]["stems"] if s != "mix"}
+    needed = {s for p in opts.parts for ps in plan[p]["passes"] for s in PASSES[ps]["stems"]}
     stems = {}
     if opts.separator == "demucs":
         print(f"\n[2/{steps}] Splitting stems with StemSplitter (Demucs, {opts.shifts} shifts)")
@@ -286,17 +298,24 @@ def run(input_path: Path, opts: Options) -> Path:
         print(f"      ~{bpm:.0f} BPM, {len(bar_starts)} bars")
 
     print(f"\n[4/{steps}] Transcribing notes (MuScriptor {opts.model_size})")
-    notes, guitar_groups = _transcribe_parts(opts, stems, mix16, cache, device)
+    notes, guitar_groups = _transcribe_parts(opts, stems, cache, device)
+    return Analysis(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts)
 
-    print(f"\n[5/{steps}] Writing tabs")
-    files = _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts, out_dir)
+
+def run(input_path: Path, opts: Options) -> Path:
+    steps = 5
+    a = analyse(input_path, opts, steps)
+    out_dir = opts.out_dir or (ROOT / "Tabs" / a.name)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n[{steps}/{steps}] Writing tabs")
+    files = _write_outputs(a.name, a.input_path, a.notes, a.guitar_groups, a.beats, a.bar_starts, a.duration, a.opts, out_dir)
     for f in files:
         print(f"      {f.name}")
     print(f"\nDone! Tabs are in: {out_dir}")
     return out_dir
 
 
-def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
+def _transcribe_parts(opts, stems, cache: Path, device: str):
     """Run the transcription passes and vote. Returns the notes per part, and
     the guitar notes grouped by stereo position (None when not split)."""
     from . import stereo
@@ -328,7 +347,7 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
         spec = PASSES[name]
         inst = "any" if spec["instruments"] is None else "+".join(spec["instruments"])
         where = f"@{spec['position']}" if "position" in spec else ""
-        source = "mix" if spec["stems"] == ["mix"] else f"{opts.separator}-{'+'.join(spec['stems'])}"
+        source = f"{opts.separator}-{'+'.join(spec['stems'])}"
         shift = f"_s{spec['shift']}" if spec.get("shift") else ""
         key = (
             f"v{CACHE_VERSION}_{source}{where}_{inst}{shift}_{opts.model_size}"
@@ -351,8 +370,6 @@ def _transcribe_parts(opts, stems, mix16, cache: Path, device: str):
             import soxr
 
             audio = soxr.resample(positions_audio[spec["position"]], guitar_stereo[1], SAMPLE_RATE, quality="VHQ")
-        elif spec["stems"] == ["mix"]:
-            audio = mix16
         else:
             audio = mix_stems(stems, spec["stems"], SAMPLE_RATE)
         shift = spec.get("shift", 0.0)
@@ -549,6 +566,20 @@ def _separate_layers(groups, bm):
     return [(f, sorted(ns, key=lambda n: (n.onset, n.pitch))) for f, ns in out if ns]
 
 
+def guitar_parts(notes, guitar_groups, bm, opts) -> list[tuple[str, list[TNote]]]:
+    """The guitar notes as the parts that get a tab each: (what tells the
+    part apart, e.g. "left, clean"; its notes). Split by stereo position
+    (`guitar_groups`), then by sound, then a line on top of a riff."""
+    groups = []
+    for where, pnotes in guitar_groups or [("", notes)]:
+        sounds = split_guitar_parts(pnotes) if opts.split_guitars else [("", pnotes)]
+        for sound, gnotes in sounds:
+            groups.append((", ".join(x for x in (where, sound) if x), gnotes))
+    if opts.tidy and opts.split_guitars:
+        groups = _separate_layers(groups, bm)
+    return groups
+
+
 def _part_grid(bm, notes, shuffle):
     """The beat map with subdivisions chosen for this part's own notes, so a
     busy guitar doesn't force a fine grid onto a simple drum beat."""
@@ -562,7 +593,6 @@ def _events(notes, bm, report: "arrange.Report | None" = None):
     q = rhythm.quantize(bm, notes, bm.subdivisions)
     if report is not None:
         q = arrange.remove_overtones(q, report)
-        q = arrange.regularize_chords(q, report)
         q = arrange.unify_repeats(q, bm, report)
     by_tick: dict[int, list] = {}
     for n in q:
@@ -570,7 +600,13 @@ def _events(notes, bm, report: "arrange.Report | None" = None):
     ticks = sorted(by_tick)
     events = []
     for t in ticks:
-        group = sorted(by_tick[t], key=lambda n: n.pitch)
+        # One note per pitch: the same pitch heard as two guitar sounds on
+        # one tick would otherwise be put on two strings.
+        longest: dict[int, object] = {}
+        for n in by_tick[t]:
+            if n.pitch not in longest or n.end_tick > longest[n.pitch].end_tick:
+                longest[n.pitch] = n
+        group = by_tick[t] = [longest[p] for p in sorted(longest)]
         events.append(
             fretboard.Event(
                 time=min(n.onset for n in group),
@@ -677,10 +713,10 @@ def _keys_part(title, notes, bm, program, two_hands=True):
     return pitches_at, parts
 
 
-def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts, out_dir: Path) -> list[Path]:
-    delay = _correct_onset_delay(notes, beats)
-    if opts.collect is not None:
-        opts.collect.append(("notes", None, notes, None))  # every part, before quantizing
+def song_grid(notes, beats, bar_starts, duration):
+    """The song's beat map at the level a person would write it (see
+    rhythm.normalize_meter), with subdivisions for all parts together.
+    Returns (beat map, whether triplets are its everyday grid)."""
     all_onsets = np.array([n.onset for ns in notes.values() for n in ns])
     pitched = np.array(sorted(n.onset for part, ns in notes.items() if part not in ("drums", "vocals") for n in ns))
     beats, bar_starts, compound, changed = rhythm.normalize_meter(beats, bar_starts, pitched)
@@ -691,6 +727,14 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
         bm.compound = True
     shuffle = rhythm.is_shuffle(bm, all_onsets)
     bm.subdivisions = rhythm.choose_subdivisions(bm, all_onsets, shuffle)
+    return bm, shuffle
+
+
+def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, duration, opts, out_dir: Path) -> list[Path]:
+    delay = _correct_onset_delay(notes, beats)
+    if opts.collect is not None:
+        opts.collect.append(("notes", None, notes, None))  # every part, before quantizing
+    bm, shuffle = song_grid(notes, beats, bar_starts, duration)
 
     tempos = [bm.bar_tempo(b) for b in bm.bars]
     tempo = float(np.median(tempos)) if tempos else 120.0
@@ -720,17 +764,13 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
 
     guitar_tuning = opts.guitar_tuning
     if "guitar" in notes and not guitar_tuning:
-        # Every guitar part gets the same tuning, detected from all of them:
-        # bands tune together, and a small part alone says little.
-        guitar_tuning = fretboard.choose_tuning(_events(notes["guitar"], bm)[2], False).name
+        # Every guitar part gets the same tuning, detected from all of them
+        # and from how low the bass goes: bands tune together, and a small
+        # part alone says little.
+        bass_events = _events(notes["bass"], bm)[2] if "bass" in notes else None
+        guitar_tuning = fretboard.choose_band_tuning(_events(notes["guitar"], bm)[2], bass_events)[0].name
     if "guitar" in notes:
-        groups = []
-        for where, pnotes in guitar_groups or [("", notes["guitar"])]:
-            sounds = split_guitar_parts(pnotes) if opts.split_guitars else [("", pnotes)]
-            for sound, gnotes in sounds:
-                groups.append((", ".join(x for x in (where, sound) if x), gnotes))
-        if opts.tidy and opts.split_guitars:
-            groups = _separate_layers(groups, bm)
+        groups = guitar_parts(notes["guitar"], guitar_groups, bm, opts)
         for gi, (flavour, gnotes) in enumerate(groups):
             title = "Guitar" if len(groups) == 1 else f"Guitar {gi + 1} ({flavour or 'main'})"
             part_bm = _part_grid(bm, gnotes, shuffle)

@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .polite import Breather
+
 SAMPLE_RATE = 16000
 SEGMENT_SECONDS = 5.0  # MuScriptor transcribes in chunks of this length
 TOKEN_BUDGETS = (640, 2000)  # tokens per chunk: usual case, MuScriptor's own limit
@@ -211,6 +213,7 @@ class Transcriber:
         from muscriptor.modules.streaming import increment_steps, init_states
 
         device = lm.emb.weight.device
+        breathe = Breather(str(device))
         K = len(prompts)
         prepend = sum(c.shape[1] for c, _ in cfg.values())
         state = init_states(lm, batch_size=K, sequence_length=prepend + max_len)
@@ -241,6 +244,7 @@ class Transcriber:
                 last = offset + 1
                 if bool(finished.all()):
                     break
+                breathe()
         del state
         return seq, prob, last, bool(finished.all())
 

@@ -10,7 +10,6 @@ the Official Ultimate Guitar tabs and GuitarSet.
 from dataclasses import replace
 
 import env
-import numpy as np
 
 import eval_fingering
 import tabdata

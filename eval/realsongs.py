@@ -1,7 +1,6 @@
 """Real songs with a human-made tab: the audio, the tab, and the tab's notes
 in playing order (repeats unrolled), in seconds of the tab's own tempo."""
 import json
-import re
 from pathlib import Path
 
 import env
@@ -69,19 +68,33 @@ def play_order(bars) -> list[int]:
     return order
 
 
+_ROWS = None
+
+
+def best_tab(paths):
+    """The dumped tab to use for a song: one file is enough; the one with
+    the most guitar notes. None if none of `paths` was dumped."""
+    global _ROWS
+    if _ROWS is None:
+        _ROWS = {}
+        for l in open(env.DATA / "tabs" / "user.jsonl", encoding="utf-8"):
+            r = json.loads(l)
+            _ROWS[r["path"]] = r
+    cands = [_ROWS[p] for p in paths if p in _ROWS]
+    if not cands:
+        return None
+    return max(cands, key=lambda r: sum(len(t["notes"]) for t in r["tracks"] if tabdata.is_guitar(t)))
+
+
 def tab_notes(paths) -> tuple[list, list]:
     """(notes, bar times) of a song's guitar tracks, played in order.
 
     notes: (seconds, pitch, string from the lowest = 0, fret, flags, track).
     bar times: seconds at which each played bar starts (tab tempo).
     """
-    rows = [json.loads(l) for p in [env.DATA / "tabs" / "user.jsonl"] for l in open(p, encoding="utf-8")]
-    by_path = {r["path"]: r for r in rows}
-    # One tab file per song is enough; prefer the one with the most guitar notes.
-    cands = [by_path[p] for p in paths if p in by_path]
-    if not cands:
+    song = best_tab(paths)
+    if song is None:
         return [], []
-    song = max(cands, key=lambda r: sum(len(t["notes"]) for t in r["tracks"] if tabdata.is_guitar(t)))
     bars = song["bars"]
     order = play_order(bars)
     bar_times, t = [], 0.0

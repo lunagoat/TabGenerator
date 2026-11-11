@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Build training data for the fingering model from all tab collections.
 
-Every guitar track becomes a note sequence (notes starting together are a
-chord, sorted low to high) with the string each note was played on. Songs
-used for testing (your held-out tabs, the Official tabs) are kept out.
+Every guitar (or bass) track becomes a note sequence (notes starting
+together are a chord, sorted low to high) with the string each note was
+played on. Songs used for testing (your held-out tabs, the Official tabs)
+are kept out.
 
-    python3 eval/fingering_data.py [--max-notes 40000000]
-Writes eval/work/fingering/{train,val}.npz
+    python3 eval/fingering_data.py [--kind bass] [--max-notes 40000000]
+Writes eval/work/fingering/{train,val}.npz (bass: bass_train.npz, bass_val.npz)
 """
 import argparse
 import hashlib
@@ -49,15 +50,17 @@ def test_titles() -> set:
     return out
 
 
-def track_arrays(track, tempo):
-    """Feature arrays for one guitar track, or None."""
+def track_arrays(track, tempo, kind="guitar"):
+    """Feature arrays for one guitar (or bass) track, or None."""
     strings = track["strings"]
     cap = track.get("offset") or 0
     n = len(strings)
-    if n not in (6, 7) or min(strings) < 33 or len(set(strings)) < n - 1:
+    if track.get("percussion") or track.get("name", "").startswith("@$") or not strings:
+        return None
+    if n not in FM.STRING_COUNTS[kind] or len(set(strings)) < n - 1 or FM.kind_of(strings) != kind:
         return None
     p = track["program"]
-    if not (24 <= p <= 31 or p < 0) or track.get("percussion") or track.get("name", "").startswith("@$"):
+    if not ((32 <= p <= 39 if kind == "bass" else 24 <= p <= 31) or p < 0):
         return None
     opens = sorted(s + cap for s in strings)  # lowest first
     order = sorted(range(n), key=lambda i: strings[i])
@@ -82,14 +85,16 @@ def track_arrays(track, tempo):
     a = np.array(rows, dtype=np.float32)
     return {"height": a[:, 0].astype(np.int16), "size": a[:, 1].astype(np.int8), "index": a[:, 2].astype(np.int8),
             "dt": a[:, 3].astype(np.float16), "dur": a[:, 4].astype(np.float16), "target": a[:, 5].astype(np.int8),
-            "layout": np.full(len(a), FM.layout_id(opens), dtype=np.int8),
+            "layout": np.full(len(a), FM.layout_id(opens, kind), dtype=np.int8),
             "opens": np.array(opens + [0] * (7 - n), dtype=np.int16)}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-notes", type=int, default=40_000_000)
+    ap.add_argument("--kind", default="guitar", choices=["guitar", "bass"])
     a = ap.parse_args()
+    prefix = "" if a.kind == "guitar" else f"{a.kind}_"
     banned = test_titles()
     print(len(banned), "test titles kept out")
     shards = {"train": [], "val": []}
@@ -115,7 +120,7 @@ def main():
             split = "val" if int(hashlib.sha1(key.encode()).hexdigest(), 16) % 100 < 2 else "train"
             tempo = row["bars"][0][2] if row["bars"] else 120
             for tr in row["tracks"]:
-                arr = track_arrays(tr, tempo)
+                arr = track_arrays(tr, tempo, a.kind)
                 if arr is None:
                     continue
                 shards[split].append(arr)
@@ -131,7 +136,7 @@ def main():
         ptr = np.cumsum([0] + [len(t["height"]) for t in tracks])
         out = {k: np.concatenate([t[k] for t in tracks]) for k in ("height", "size", "index", "dt", "dur", "target", "layout")}
         out["opens"] = np.stack([t["opens"] for t in tracks])
-        np.savez(OUT / f"{split}.npz", ptr=ptr, **out)
+        np.savez(OUT / f"{prefix}{split}.npz", ptr=ptr, **out)
         print(f"{split}: {len(tracks):,} tracks, {ptr[-1]:,} notes")
     print(f"{skipped} songs left out as test songs")
 

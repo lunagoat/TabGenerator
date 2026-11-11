@@ -28,7 +28,6 @@ import realeval as R
 import tabdata
 from tabgen import pipeline
 from tabgen.ensemble import DRUM_TYPE
-from tabgen.transcribe import TNote
 
 OUT = env.WORK / "official"
 AUDIO = (".flac", ".dsf", ".wav", ".mp3", ".m4a", ".ogg", ".opus", ".aiff", ".ape", ".wv")
@@ -243,8 +242,8 @@ def score(song, row, res):
             r[f"f1@{int(tol * 1000)}"], r[f"recall@{int(tol * 1000)}"], r[f"precision@{int(tol * 1000)}"] = f, rc, p
         if part in res["fretted"]:
             gen = res["fretted"][part]
-            _, _, _, m = prf(truth, gen, 0.1)
-            r["tab_recall@100"] = len(m) / len(truth)
+            tp, tr, tf, m = prf(truth, gen, 0.1)
+            r["tab_recall@100"], r["tab_precision@100"], r["tab_f1@100"] = tr, tp, tf
             r["same_string"] = sum(gen[j][2] == truth[i][2] for i, j in m) / max(1, len(m))
             r["same_fret"] = sum(gen[j][3] == truth[i][3] for i, j in m) / max(1, len(m))
             r["tuning"] = res["tuning"].get(part, "")
@@ -294,6 +293,8 @@ def main():
         if any("same_string" in p for p in ps):
             line += f"; same string {m('same_string'):.3f}, same fret {m('same_fret'):.3f}"
         print(line)
+        if any("tab_f1@100" in p for p in ps):
+            print(f"           written tab: F1 {m('tab_f1@100'):.3f} @100ms (recall {m('tab_recall@100'):.3f}, precision {m('tab_precision@100'):.3f})")
         if any("same_place_in_beat" in p for p in ps):
             print(f"           rhythm: same place in the beat {m('same_place_in_beat'):.3f}, same place in the bar {m('same_place_in_bar'):.3f}")
     nots = [r["notation"] for r in good if "notation" in r]

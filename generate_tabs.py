@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Turn any audio file into guitar, bass and drum tabs.
+"""Turn any audio file into guitar, bass, drum, keyboard and vocal tabs.
 
-Uses the base Python installation, without a virtual environment, like
-StemSplitter. Packages come from this folder's _packages plus StemSplitter's
-_packages (which provides PyTorch and Demucs).
+Uses the base Python installation, without a virtual environment. Packages
+come from this folder's _packages (see install.sh); a StemSplitter folder
+next to this one is a fallback and provides Demucs for --separator demucs.
 """
 import argparse
 import os
@@ -75,6 +75,9 @@ def main():
                         help="transcriptions decoded at once (default: 8; lower it if the GPU runs out of memory)")
     parser.add_argument("--full-precision", action="store_true", help="run the model in 32-bit floats on the GPU (slower, same results)")
     parser.add_argument("--device", help="cuda or cpu (default: cuda if available)")
+    parser.add_argument("--full-speed", action="store_true",
+                        help="use every CPU core and the whole GPU (default: low priority, half the cores and short GPU "
+                             "pauses, so the computer stays usable; about a fifth slower)")
     parser.add_argument("--fast", action="store_true",
                         help="one transcription pass per part instead of voting over several (~3x faster, a bit less accurate)")
     parser.add_argument("--one-guitar", action="store_true", help="never split guitars into separate parts")
@@ -85,6 +88,8 @@ def main():
     parser.add_argument("-o", "--output", help="output folder (default: Tabs/<song name>)")
     parser.add_argument("--no-open", action="store_true", help="don't open the output folder when done")
     args = parser.parse_args()
+    if args.full_speed:
+        os.environ["TABGEN_FULL_SPEED"] = "1"
 
     setup_paths()
     from tabgen.pipeline import PART_GROUPS, PARTS, Options, open_folder, run

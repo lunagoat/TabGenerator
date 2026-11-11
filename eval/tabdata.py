@@ -73,7 +73,9 @@ def _seconds(bars):
     return conv
 
 
-def load(paths=None, min_events=20):
+def load(paths=None, min_events=20, kind=None):
+    """Tracks of one kind (default: guitars; `kind=is_bass` for basses)."""
+    kind = kind or is_guitar
     # Default: your own Guitar Pro collection (the big imported sets are
     # read in chunks by fingering_data.py instead).
     paths = paths or [env.DATA / "tabs" / "user.jsonl"]
@@ -83,7 +85,7 @@ def load(paths=None, min_events=20):
             song = json.loads(line)
             conv = _seconds(song["bars"])
             for t in song["tracks"]:
-                if not is_guitar(t):
+                if not kind(t):
                     continue
                 cap = t.get("offset") or 0  # capo: the strings sound this much higher
                 strings = [p + cap for p in t["strings"]]  # string 1 = highest

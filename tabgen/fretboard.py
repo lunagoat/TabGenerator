@@ -134,7 +134,10 @@ class FingeringWeights:
     shape_prior: float = 1.0
     string_prior: float = 1.0
     prior: "FingeringPrior | None" = None  # None: the one shipped in tabgen/data
-    model_weight: float = 0.5  # learned string model (fingering_model.py), per unit of -log probability
+    # Learned string model (fingering_model.py), per unit of -log probability;
+    # chosen on the pipeline's own transcriptions (eval/eval_fingering_real.py).
+    model_weight: float = 1.0
+    model_weight_bass: float = 2.0
 
 
 @dataclass
@@ -471,9 +474,11 @@ def assign_frets(
     if w.prior is None and (w.shape_prior or w.string_prior):
         w = replace(w, prior=default_prior())
     costs = None
-    if w.model_weight:
-        from . import fingering_model
+    from . import fingering_model
 
+    if fingering_model.kind_of(tuning.strings) == "bass":
+        w = replace(w, model_weight=w.model_weight_bass)
+    if w.model_weight:
         costs = fingering_model.string_logprobs(events, tuning.strings)
     layers = [_Layer(e, tuning, max_fret, w, costs[i] if costs else None) for i, e in enumerate(events)]
     # Viterbi over events that have at least one candidate.
@@ -562,6 +567,36 @@ def fit_to_range(events: list[Event], tuning: Tuning) -> int:
 TUNING_RARITY = 0.2  # weight of -log(how common a tuning is) against fingering cost per note
 TUNING_MAX_EVENTS = 1500  # enough of a song to judge its tuning
 MAX_BELOW = 0.02  # share of notes allowed below a tuning's lowest string (strays)
+# The bass tells the band's tuning apart where the guitar cannot (E from Eb
+# standard when the guitar never plays its lowest string): against a guitar
+# tuning whose bass could not play the bass's lowest notes, and a little for
+# one whose bass has them on its open lowest string. In fingering cost per note.
+# Chosen on 42 real recordings with tabs (eval/eval_tuning_band.py).
+BASS_TOO_LOW = 1.0
+BASS_ON_OPEN = 0.1
+
+
+def lowest_played(events: list[Event] | None, min_frac: float = 0.01) -> int | None:
+    """The lowest pitch a part plays more than in passing (None: no notes)."""
+    if not events:
+        return None
+    return robust_lowest([p for e in events for p in e.pitches], 3, min_frac)
+
+
+def bass_lowest_for(guitar: Tuning) -> int:
+    """Lowest string of the bass that goes with a guitar tuning: an octave
+    below the guitar's (a capo is the guitarist's alone), and never above a
+    standard bass's E."""
+    return min(guitar.lowest - guitar.capo - 12, BASS_TUNINGS[0].lowest)
+
+
+def choose_band_tuning(guitar: list[Event] | None, bass: list[Event] | None,
+                       weights: FingeringWeights | None = None) -> tuple[Tuning | None, Tuning | None]:
+    """(guitar tuning, bass tuning) of a band that tunes together; None for
+    a part that isn't there."""
+    g = choose_tuning(guitar, False, weights=weights, bass_low=lowest_played(bass)) if guitar else None
+    b = choose_tuning(bass, True, weights=weights, band_tuning=g.name if g else None) if bass else None
+    return g, b
 
 
 def choose_tuning(
@@ -570,6 +605,7 @@ def choose_tuning(
     max_fret: int = 24,
     weights: FingeringWeights | None = None,
     band_tuning: str | None = None,
+    bass_low: int | None = None,
 ) -> Tuning:
     """Pick the tuning the part was most likely played in.
 
@@ -584,6 +620,8 @@ def choose_tuning(
 
     `band_tuning` is the guitar's tuning: bands tune together, so the bass
     gets the same one unless that leaves more than 5% of its notes too low.
+    `bass_low` (for a guitar) is the lowest note the band's bass plays: see
+    BASS_TOO_LOW.
     """
     import math
 
@@ -628,6 +666,11 @@ def choose_tuning(
         else:
             rarity = t.prior
         score = cost / n_notes + rarity
+        if bass_low is not None and not bass:
+            if bass_low < bass_lowest_for(t):
+                score += BASS_TOO_LOW
+            elif bass_low == bass_lowest_for(t):
+                score -= BASS_ON_OPEN
         if best is None or score < best[0]:
             best = (score, t)
     return best[1]

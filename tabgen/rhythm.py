@@ -176,6 +176,7 @@ class QNote:
     is_drum: bool
     onset: float  # original times in seconds, kept for fingering
     offset: float
+    conf: float = 1.0  # share of the transcription passes that heard it
 
 
 def _cluster(times: np.ndarray) -> np.ndarray:
@@ -327,7 +328,7 @@ def quantize_each(bm: BeatMap, notes, subdivisions: np.ndarray) -> list[QNote]:
         else:
             end, _ = snap(nt.offset)
             end = max(end, on + step)
-        out.append(QNote(on, end, nt.pitch, nt.instrument, nt.is_drum, nt.onset, nt.offset))
+        out.append(QNote(on, end, nt.pitch, nt.instrument, nt.is_drum, nt.onset, nt.offset, nt.conf))
     return out
 
 
