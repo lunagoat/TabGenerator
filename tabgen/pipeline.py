@@ -134,6 +134,7 @@ class Options:
     batch: int = 8  # transcription passes decoded together (GPU memory vs speed)
     full_precision: bool = False  # fp32 on the GPU instead of fp16
     tidy: bool = True  # make repeats agree and keep each part playable by one guitarist
+    collect: list | None = None  # for evaluation: gets (part title, beat map, GPPart, info) per fretted part
 
 
 def _device(opts: Options) -> str:
@@ -731,6 +732,8 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
                 title, gnotes, part_bm, False, guitar_tuning, 30, tidy=opts.tidy
             )
             gp_parts.append(gp_part)
+            if opts.collect is not None:
+                opts.collect.append((title, part_bm, gp_part, info))
             header = base_header + [
                 f"Part: {title}",
                 f"Tuning: {info['tuning']}",

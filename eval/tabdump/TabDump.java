@@ -61,7 +61,8 @@ public class TabDump {
                       .append(mh.getTempo().getQuarterValue()).append(',')
                       .append(mh.getTimeSignature().getNumerator()).append(',')
                       .append(mh.getTimeSignature().getDenominator().getValue()).append(',')
-                      .append(mh.getRepeatClose()).append(',').append(mh.isRepeatOpen() ? 1 : 0).append(']');
+                      .append(mh.getRepeatClose()).append(',').append(mh.isRepeatOpen() ? 1 : 0).append(',')
+                      .append(mh.getRepeatAlternative()).append(']');
                 }
                 sb.append("],\"tracks\":[");
                 Iterator<TGTrack> ts = song.getTracks();
