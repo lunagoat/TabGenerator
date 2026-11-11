@@ -3,10 +3,27 @@
 Turns any audio file (flac, wav, mp3, m4a, ogg, opus, even video files) into
 **guitar, bass and drum tabs**, plus piano, synth and vocal-melody parts.
 
-Run from a terminal (quotes are required because the path contains spaces):
+## Install
+
+Linux, Python 3.10 or newer, ffmpeg, and ideally an NVIDIA GPU (about 6 GB
+of video memory; it runs on the CPU too, very slowly).
 
 ```sh
-"/home/luna/Desktop/vibecode slop/TabGenerator/launch.sh" "path/to/song.flac"
+git clone https://github.com/lunagoat/TabGenerator && cd TabGenerator
+./install.sh
+```
+
+The installer puts every Python package into `./_packages` (no virtual
+environment, nothing system-wide; delete the folder to uninstall) and
+downloads the transcription model. That model is free but gated: accept its
+license at https://huggingface.co/MuScriptor/muscriptor-large and log in to
+Hugging Face when the installer asks. `./install.sh --cpu` forces the CPU
+build of PyTorch.
+
+## Use
+
+```sh
+./launch.sh "path/to/song.flac"
 ```
 
 Without a file argument it asks for one (drag and drop works). Several files
@@ -129,24 +146,23 @@ seconds.
 Intermediate results (decoded audio, stems, beats, notes) are cached in
 `.cache/`, so re-running a song with different tab options is instant.
 
-## Setup
+## Setup details
 
-The script uses base Python and loads packages from `_packages` (no virtual
-environment), plus PyTorch (and Demucs, for `--separator demucs`) from
-`StemSplitter/_packages`. To
-install or restore packages, run `./setup.sh` from this folder (and
-StemSplitter's `setup.sh` if PyTorch/Demucs are missing).
+`./install.sh` installs into `./_packages`. If a StemSplitter folder sits
+next to this one, its packages are used as a fallback, and
+`--separator demucs` uses its Demucs model; nothing else needs it.
 
-The MuScriptor weights are gated (free, non-commercial CC BY-NC 4.0 license).
-They are read from `~/muscriptor-large/model.safetensors`; to put them
-elsewhere use `--weights PATH` or set `MUSCRIPTOR_WEIGHTS`. If there is no
-local copy, they are downloaded using your Hugging Face login.
+MuScriptor's weights are read from `~/muscriptor-large/model.safetensors` if
+that exists (`--weights PATH` or `MUSCRIPTOR_WEIGHTS` point elsewhere);
+otherwise from the Hugging Face cache. The BS-RoFormer separator weights
+(700 MB) are downloaded to `~/.cache/tabgenerator/` on the first run (or set
+`BS_ROFORMER_WEIGHTS`).
 
-The BS-RoFormer weights (700 MB) are downloaded once to
-`~/.cache/tabgenerator/` (or point `BS_ROFORMER_WEIGHTS` at the file).
+The large model needs about 6 GB of GPU memory at the default `--batch 8`.
+On the CPU use `--model small`.
 
-The large model needs about 6 GB of GPU memory at the default `--batch 8`. It runs on the CPU too, but
-very slowly; use `--model small` there.
+The evaluation scripts in `eval/` need test data downloaded separately into
+`eval/data/` and, for Guitar Pro reading, TuxGuitar from Flathub.
 
 ## How accurate is it?
 

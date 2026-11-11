@@ -44,7 +44,7 @@ else
 fi
 
 pip_install() {
-    PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --upgrade --target "$pkgs" "$@"
+    PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --upgrade --no-warn-conflicts --target "$pkgs" "$@"
 }
 
 # --- packages ---------------------------------------------------------------

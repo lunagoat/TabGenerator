@@ -6,6 +6,7 @@ the library has every title word in its file name and the artist (or a known
 abbreviation) somewhere in its path.
 """
 import csv
+import os
 import json
 import re
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import env
 
-LIBRARY = Path("/run/media/luna/8TB HDD/FLACs")
+LIBRARY = Path(os.environ.get("TABGEN_LIBRARY", "~/Music")).expanduser()  # your FLAC library
 ALIASES = {
     "aic": "Alice In Chains", "rhcp": "Red Hot Chili Peppers", "stp": "Stone Temple Pilots",
     "ratm": "Rage Against The Machine", "qotsa": "Queens Of The Stone Age", "fnm": "Faith No More",
