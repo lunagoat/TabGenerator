@@ -21,19 +21,29 @@ def note_name(pitch: int) -> str:
 @dataclass(frozen=True)
 class Tuning:
     name: str
-    strings: tuple[int, ...]  # MIDI pitch of each open string, lowest string first
+    strings: tuple[int, ...]  # MIDI pitch of each open string as it sounds (capo included), lowest first
     prior: float = 0.0  # how unlikely this tuning is a priori (added per song)
+    capo: int = 0  # frets are counted from the capo
 
     @property
     def lowest(self) -> int:
         return self.strings[0]
 
+    @property
+    def open_strings(self) -> tuple[int, ...]:
+        """The strings without the capo (what the guitar is tuned to)."""
+        return tuple(p - self.capo for p in self.strings)
+
     def labels(self) -> list[str]:
         """Names for the string lines, lowest string first (top string lowercase if E)."""
-        names = [note_name(p) for p in self.strings]
+        names = [note_name(p) for p in self.open_strings]
         if names[-1] == "E":
             names[-1] = "e"
         return names
+
+    def describe(self) -> str:
+        """"E Standard, capo 2 (E A D G B E)"."""
+        return f"{self.name} ({' '.join(note_name(p) for p in self.open_strings)})"
 
 
 GUITAR_TUNINGS = [
@@ -50,6 +60,16 @@ GUITAR_TUNINGS = [
     Tuning("7-String B Standard", (35, 40, 45, 50, 55, 59, 64), 0.6),
     Tuning("Drop A", (33, 40, 45, 50, 55, 59), 1.2),
     Tuning("7-String Drop A", (33, 40, 45, 50, 55, 59, 64), 1.0),
+    Tuning("Open D", (38, 45, 50, 54, 57, 62), 1.0),
+    Tuning("DADGAD", (38, 45, 50, 55, 57, 62), 1.0),
+    Tuning("Open G", (38, 43, 50, 55, 59, 62), 1.0),
+    Tuning("Open G, low G", (43, 43, 50, 55, 59, 62), 1.2),  # G G D G B D (Pearl Jam)
+    Tuning("Open E", (40, 47, 52, 56, 59, 64), 1.2),
+] + [
+    # A capo on a standard-tuned guitar: acoustic songs in keys like F# or
+    # B are played with open-chord shapes a few frets up.
+    Tuning(f"E Standard, capo {c}", tuple(p + c for p in (40, 45, 50, 55, 59, 64)), 1.0 + 0.1 * c, capo=c)
+    for c in range(1, 8)
 ]
 
 BASS_TUNINGS = [
@@ -69,7 +89,7 @@ BASS_TUNINGS = [
 def _tuning_key(name: str) -> str:
     """Spelling-insensitive key: "Drop D", "drop_d", "DropD", "drop-d" all match."""
     key = name.lower()
-    for ch in " -_":
+    for ch in " -_,":
         key = key.replace(ch, "")
     return key.replace("standard", "std")
 

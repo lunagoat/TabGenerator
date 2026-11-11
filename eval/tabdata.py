@@ -83,7 +83,8 @@ def load(paths=None, min_events=20):
             for t in song["tracks"]:
                 if not is_guitar(t):
                     continue
-                strings = t["strings"]  # string 1 = highest
+                cap = t.get("offset") or 0  # capo: the strings sound this much higher
+                strings = [p + cap for p in t["strings"]]  # string 1 = highest
                 n = len(strings)
                 tuning = fretboard.Tuning("tab", tuple(sorted(strings)))
                 order = sorted(range(n), key=lambda i: strings[i])

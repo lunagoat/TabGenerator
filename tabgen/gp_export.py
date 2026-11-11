@@ -48,6 +48,7 @@ class GPPart:
     program: int = 30
     fret_count: int = 24
     bm: BeatMap | None = None  # this part's own rhythmic grid (default: the song's)
+    capo: int = 0  # `strings` sound with the capo on; frets count from it
 
 
 def _gp_duration(ticks: int) -> gp.Duration:
@@ -99,7 +100,8 @@ def _make_track(song: gp.Song, number: int, part: GPPart, channel: int, effect: 
         track.strings = [gp.GuitarString(i + 1, 0) for i in range(6)]
         track.channel = gp.MidiChannel(channel=9, effectChannel=9, instrument=0)
     else:
-        track.strings = [gp.GuitarString(i + 1, v) for i, v in enumerate(reversed(part.strings))]
+        track.strings = [gp.GuitarString(i + 1, v - part.capo) for i, v in enumerate(reversed(part.strings))]
+        track.offset = part.capo
         track.channel = gp.MidiChannel(channel=channel, effectChannel=effect, instrument=part.program)
         track.fretCount = part.fret_count
     track.indicateTuning = True

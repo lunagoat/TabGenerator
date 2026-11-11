@@ -614,16 +614,16 @@ def _fretted_part(title, notes, bm, tunings_table_bass: bool, forced_tuning, pro
     for n in notes:
         counts[n.instrument] = counts.get(n.instrument, 0) + 1
     program = GM_PROGRAMS.get(max(counts, key=counts.get), program_default) if counts else program_default
-    strings_desc = " ".join(fretboard.note_name(p) for p in tuning.strings)
     info = {
-        "tuning": f"{tuning.name} ({strings_desc})",
+        "tuning": tuning.describe(),
+        "capo": tuning.capo,
         "notes": len(notes),
         "dropped": dropped - out_of_reach,
         "moved": moved,
         "tuning_name": tuning.name,
         "tidy": report.lines() if report else [],
     }
-    gp_part = gp_export.GPPart(title, gp_events, tuning.strings, program, max_fret, bm=bm)
+    gp_part = gp_export.GPPart(title, gp_events, tuning.strings, program, max_fret, bm=bm, capo=tuning.capo)
     return labels, text_events, gp_part, info
 
 
@@ -681,9 +681,13 @@ def _write_outputs(name, input_path, notes, guitar_groups, beats, bar_starts, du
     delay = _correct_onset_delay(notes, beats)
     if opts.collect is not None:
         opts.collect.append(("notes", None, notes, None))  # every part, before quantizing
-    bm = rhythm.build_beatmap(beats, bar_starts, duration)
     all_onsets = np.array([n.onset for ns in notes.values() for n in ns])
-    if rhythm.detect_compound(bm, all_onsets):
+    pitched = np.array(sorted(n.onset for part, ns in notes.items() if part not in ("drums", "vocals") for n in ns))
+    beats, bar_starts, compound, changed = rhythm.normalize_meter(beats, bar_starts, pitched)
+    if changed:
+        print(f"      beat: {changed}")
+    bm = rhythm.build_beatmap(beats, bar_starts, duration)
+    if compound or rhythm.detect_compound(bm, all_onsets):
         bm.compound = True
     shuffle = rhythm.is_shuffle(bm, all_onsets)
     bm.subdivisions = rhythm.choose_subdivisions(bm, all_onsets, shuffle)

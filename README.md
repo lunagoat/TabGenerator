@@ -87,7 +87,9 @@ seconds.
    A note is kept when two passes agree on it, and its timing is the median
    of the passes. All passes are decoded together on the GPU in half
    precision, which is several times faster than one after another.
-5. **Rhythm**: each part gets, per beat, the subdivision (8ths, 16ths,
+5. **Rhythm**: bars of six, nine or twelve tracked beats are written in
+   6/8, 9/8 or 12/8, and the tempo is halved or doubled when a person would
+   clearly write it that way (learned from the tabs). Each part gets, per beat, the subdivision (8ths, 16ths,
    triplets, 32nds) that best explains its own notes; a lone triplet beat in
    a straight passage needs clear evidence. 6/8 and 12/8 feels are detected.
 6. **Tidying** (`tabgen/arrange.py`): what turns a list of heard notes
@@ -129,7 +131,9 @@ seconds.
 --parts guitar,bass     only some parts (guitar, bass, drums, piano, synth, vocals; keys = piano + synth)
 --vocals-as guitar      the sung melody as guitar tablature (or: both)
 --keys-as guitar        piano/synth as guitar tablature (or: both)
---guitar-tuning "Drop D"   override the detected tuning (also --bass-tuning)
+--guitar-tuning "Drop D"   override the detected tuning (also --bass-tuning); also open tunings
+                        ("Open G", "Open D", "DADGAD", "Open E", "Open G, low G") and a capo
+                        ("E Standard, capo 2"), which detection rarely picks on its own
 --one-guitar            one guitar tab with everything (no stereo/sound split; saves 3 passes)
 --fast                  one transcription per part instead of voting
 --separator demucs      Demucs htdemucs_6s (via StemSplitter) instead of BS-RoFormer

@@ -126,15 +126,18 @@ def tab_parts(row):
             if k == "drums":
                 kind_ = DRUM_TYPE.get(fret)
                 if kind_:
-                    notes.append((seconds(tick), kind_, -1, -1))
+                    notes.append((seconds(tick), kind_, -1, -1, 0.0, 0.0))
             else:
                 # offset = capo: frets count from it, so the sounding pitch
                 # and the fret on a neck without a capo are both + offset.
                 cap = tr.get("offset", 0) or 0
-                notes.append((seconds(tick), strings[s - 1] + fret + cap, order.index(s - 1), fret + cap))
+                i = max(0, bisect.bisect_right(starts, tick) - 1)
+                notes.append((seconds(tick), strings[s - 1] + fret + cap, order.index(s - 1), fret + cap,
+                              (tick - starts[i]) / tabdata.TICKS, bars[i][1] / tabdata.TICKS))
     for k in out:
         out[k] = sorted(set(out[k]))
-    return out, secs
+    tab_bars = [(secs[i], b[1] / tabdata.TICKS) for i, b in enumerate(bars)]
+    return out, secs, tab_bars
 
 
 def run_pipeline(song):
@@ -153,10 +156,22 @@ def run_pipeline(song):
             continue
         part = "bass" if title == "Bass" else "guitar"
         res["tuning"].setdefault(part, info["tuning"])
+        capo = info.get("capo", 0)
+        qpb = 1.5 if bm.compound else 1.0  # quarter notes per beat
+        bar_of = []  # beat index -> (bar start beat, beats in bar)
+        for bar in bm.bars:
+            bar_of += [(bar.first_beat, bar.n_beats)] * bar.n_beats
+        if "bars" not in res:
+            res["bars"] = [[float(bm.beats[min(b.first_beat, len(bm.beats) - 1)]), b.n_beats * qpb] for b in bm.bars]
+            res["seconds_per_quarter"] = float(np.median(np.diff(bm.beats))) / qpb
         for ev in payload.events:
-            t = float(bm.beat_to_time(ev.tick / bm.beat_ticks))
+            beat = ev.tick / bm.beat_ticks
+            t = float(bm.beat_to_time(beat))
+            first, n = bar_of[min(int(beat), len(bar_of) - 1)]
             for s, f in ev.notes:
-                res["fretted"].setdefault(part, []).append([t, payload.strings[s] + f, s, f])
+                # [seconds, pitch, string, fret, quarters into the bar, quarters in the bar]
+                res["fretted"].setdefault(part, []).append(
+                    [t, payload.strings[s] + f, s, f + capo, (beat - first) * qpb, n * qpb])
     cached.write_text(json.dumps(res))
     return res
 
@@ -167,8 +182,50 @@ def prf(truth, pred, tol):
     return p, r, 2 * p * r / max(1e-9, p + r), m
 
 
+POS_TOL = 0.07  # quarter notes: a 16th is 0.25, a triplet 8th 0.33
+
+
+def _circ(a, b, period=1.0):
+    d = abs(a - b) % period
+    return min(d, period - d)
+
+
+def rhythm_scores(truth, gen, matches):
+    """For notes both tabs have: written at the same place in the bar, and
+    at the same place within the beat (the same 16th, triplet, ...)."""
+    if not matches:
+        return {}
+    in_bar = in_beat = 0
+    for i, j in matches:
+        qt, qg = truth[i][4], gen[j][4]
+        in_bar += abs(qt - qg) < POS_TOL and abs(truth[i][5] - gen[j][5]) < 1e-6
+        in_beat += _circ(qt, qg) < POS_TOL
+    return {"same_place_in_bar": in_bar / len(matches), "same_place_in_beat": in_beat / len(matches)}
+
+
+def notation_scores(tab_bars, to_audio, res):
+    """Bar lines, time signatures and tempo of the generated tab against the official one."""
+    ours = res["bars"]
+    tab = [(float(to_audio(t)), q) for t, q in tab_bars]
+    # Tempo: seconds per quarter note, in the official tab (as aligned) vs ours.
+    spq = [(tab[k + 1][0] - tab[k][0]) / tab[k][1] for k in range(len(tab) - 1) if tab[k][1] > 0]
+    ratio = float(np.median(spq)) / res["seconds_per_quarter"]
+    starts = np.array([b[0] for b in ours])
+    hit = same_len = 0
+    for t, q in tab:
+        k = int(np.argmin(np.abs(starts - t)))
+        if abs(starts[k] - t) <= 0.1:
+            hit += 1
+            same_len += abs(ours[k][1] - q) < 1e-6
+    lo, hi = tab[0][0] - 1, tab[-1][0] + 1
+    n_ours = int(np.sum((starts >= lo) & (starts <= hi)))
+    p, r = hit / max(1, n_ours), hit / max(1, len(tab))
+    return {"tempo_ratio": ratio, "bar_line_f1": 2 * p * r / max(1e-9, p + r),
+            "same_bar_length": same_len / max(1, hit)}
+
+
 def score(song, row, res):
-    parts, bar_secs = tab_parts(row)
+    parts, bar_secs, tab_bars = tab_parts(row)
     pitched = [n for k in ("guitar", "bass") for n in parts.get(k, [])]
     raw = [x for k in ("guitar", "bass") for x in res["notes"].get(k, [])]
     if len(pitched) < 30 or len(raw) < 30:
@@ -176,7 +233,7 @@ def score(song, row, res):
     to_audio, shift, quality = R.align(sorted(pitched), bar_secs, sorted(raw))
     out = {"song": song["title"], "quality": quality, "shift": shift, "parts": {}}
     for part, notes in parts.items():
-        truth = [(float(to_audio(n[0])), n[1] if part == "drums" else n[1] + shift, n[2], n[3]) for n in notes]
+        truth = [(float(to_audio(n[0])), n[1] if part == "drums" else n[1] + shift, n[2], n[3], n[4], n[5]) for n in notes]
         pred = res["notes"].get(part, [])
         if len(truth) < 20:
             continue
@@ -191,7 +248,10 @@ def score(song, row, res):
             r["same_string"] = sum(gen[j][2] == truth[i][2] for i, j in m) / max(1, len(m))
             r["same_fret"] = sum(gen[j][3] == truth[i][3] for i, j in m) / max(1, len(m))
             r["tuning"] = res["tuning"].get(part, "")
+            r.update(rhythm_scores(truth, gen, m))
         out["parts"][part] = r
+    if "bars" in res:
+        out["notation"] = notation_scores(tab_bars, to_audio, res)
     return out
 
 
@@ -234,6 +294,16 @@ def main():
         if any("same_string" in p for p in ps):
             line += f"; same string {m('same_string'):.3f}, same fret {m('same_fret'):.3f}"
         print(line)
+        if any("same_place_in_beat" in p for p in ps):
+            print(f"           rhythm: same place in the beat {m('same_place_in_beat'):.3f}, same place in the bar {m('same_place_in_bar'):.3f}")
+    nots = [r["notation"] for r in good if "notation" in r]
+    if nots:
+        print("  notation per song (tempo ratio = official / ours; 1.0 = same beat):")
+        for r in good:
+            n = r.get("notation")
+            if n:
+                print(f"    {r['song'][:26]:26s} tempo ratio {n['tempo_ratio']:.2f}  bar lines F1 {n['bar_line_f1']:.2f}  same bar length {n['same_bar_length']:.2f}"
+                      + (f"  guitar: same place in beat {r['parts']['guitar'].get('same_place_in_beat', 0):.2f}, in bar {r['parts']['guitar'].get('same_place_in_bar', 0):.2f}" if 'guitar' in r['parts'] else ""))
 
 
 if __name__ == "__main__":

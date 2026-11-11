@@ -329,3 +329,115 @@ def quantize_each(bm: BeatMap, notes, subdivisions: np.ndarray) -> list[QNote]:
             end = max(end, on + step)
         out.append(QNote(on, end, nt.pitch, nt.instrument, nt.is_drum, nt.onset, nt.offset))
     return out
+
+
+# ----------------------------------------------------------------------------
+# Tempo level: the beat, twice it, or half of it
+
+
+def level_features(quarters: np.ndarray, bpm: float, tol: float = 0.06) -> np.ndarray:
+    """What a part would look like written with these onsets (in beats) at
+    this tempo: how ordinary the tempo is, and how many notes would need
+    16ths, triplets or something finer. Learned weights turn these into a
+    preference (eval/tempo_level.py)."""
+    q = np.asarray(quarters, dtype=float)
+    frac = q - np.floor(q)
+    near = lambda c: np.minimum(np.abs(frac - c), 1 - np.abs(frac - c)) < tol
+    on = near(0.0)
+    eighth = near(0.5) & ~on
+    sixteenth = (near(0.25) | near(0.75)) & ~on & ~eighth
+    triplet = (near(1 / 3) | near(2 / 3)) & ~on & ~eighth & ~sixteenth
+    finer = ~(on | eighth | sixteenth | triplet)
+    lb = np.log2(max(bpm, 1.0) / 110.0)
+    n = max(1, len(q))
+    # Notes per beat: dense parts are written at a slower beat.
+    beats = max(1.0, q.max() - q.min()) if len(q) else 1.0
+    density = np.log2(max(len(q) / beats, 1e-3))
+    return np.array([lb, lb * lb, on.sum() / n, eighth.sum() / n, sixteenth.sum() / n,
+                     triplet.sum() / n, finer.sum() / n, density])
+
+
+LEVEL_MARGIN = 1.0  # how much more natural another level must read before the tracked beat is changed
+
+
+def choose_level(beat_positions: np.ndarray, bpm: float, weights) -> float:
+    """1.0 to keep the tracked beat, 2.0 to make a beat out of two tracked
+    beats (half the tempo), 0.5 to split each beat (double the tempo).
+
+    Only a clear preference changes the beat: between a beat and half of it
+    tabbers themselves disagree (a half-time feel written at 75 BPM, a fast
+    section at 178), and on the Official tabs a narrow call went either way."""
+    w = np.asarray(weights)
+    score = {k: float(level_features(beat_positions / k, bpm / k) @ w) for k in (1.0, 2.0, 0.5)}
+    best = max(score, key=score.get)
+    return best if score[best] - score[1.0] >= LEVEL_MARGIN else 1.0
+
+
+_LEVEL_WEIGHTS = None
+
+
+def level_weights():
+    """The tempo-level model shipped in tabgen/data/fingering_prior.json."""
+    global _LEVEL_WEIGHTS
+    if _LEVEL_WEIGHTS is None:
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).with_name("data") / "fingering_prior.json"
+        d = json.loads(path.read_text()) if path.is_file() else {}
+        _LEVEL_WEIGHTS = d.get("tempo_level") or False
+    return _LEVEL_WEIGHTS or None
+
+
+def _dominant(gaps) -> int:
+    gaps = [g for g in gaps if g > 0]
+    if not gaps:
+        return 4
+    vals, counts = np.unique(gaps, return_counts=True)
+    return int(vals[counts.argmax()])
+
+
+def normalize_meter(beats: np.ndarray, bar_starts: np.ndarray, onsets: np.ndarray):
+    """Put the tracked beats at the level a person would write.
+
+    - Bars of 6, 9 or 12 tracked beats are 6/8, 9/8 or 12/8: the tracked
+      beat is the eighth note, so beats are grouped in threes (compound).
+    - Otherwise the tempo may be halved or doubled when the notes read more
+      naturally that way (see level_features).
+
+    Returns (beats, bar_starts, compound, what was done or "")."""
+    beats = np.asarray(beats, dtype=float)
+    bar_starts = np.asarray(bar_starts, dtype=int)
+    if len(beats) < 16 or len(bar_starts) < 4:
+        return beats, bar_starts, False, ""
+    meter = _dominant(np.diff(bar_starts))
+    if meter in (6, 9, 12):
+        phase = int(np.bincount(bar_starts % 3, minlength=3).argmax())
+        keep = bar_starts[bar_starts % 3 == phase]
+        return beats[phase::3], (keep - phase) // 3, True, f"grouped in threes ({meter}/8)"
+    w = level_weights()
+    if w is None or not len(onsets):
+        return beats, bar_starts, False, ""
+    pos = np.interp(onsets, beats, np.arange(len(beats)))
+    bpm = 60.0 / float(np.median(np.diff(beats)))
+    k = choose_level(pos, bpm, w)
+    if k == 2.0 and meter % 2 == 0:
+        # Keep the tracked beats the notes land on, not the off-beats.
+        near = [np.sum(np.min(np.abs(onsets[:, None] - beats[None, p::2]), axis=1) < 0.04) if len(onsets) < 20000 else 0
+                for p in (0, 1)]
+        phase = int(np.argmax(near))
+        if bar_starts[bar_starts % 2 == phase].size == 0:
+            bar_starts = bar_starts + 1
+        keep = (bar_starts[bar_starts % 2 == phase] - phase) // 2
+        if meter // 2 <= 2 and len(keep) > 1:
+            keep = keep[::2]  # two short bars make one
+        return beats[phase::2], keep, False, "half the tracked tempo"
+    if k == 0.5:
+        mids = (beats[:-1] + beats[1:]) / 2
+        doubled = np.empty(len(beats) + len(mids))
+        doubled[0::2], doubled[1::2] = beats, mids
+        starts = list(bar_starts * 2)
+        if meter * 2 >= 8:  # one long bar makes two
+            starts += [b + meter for b in starts]
+        return doubled, np.array(sorted(set(starts))), False, "double the tracked tempo"
+    return beats, bar_starts, False, ""

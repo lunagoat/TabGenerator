@@ -33,7 +33,7 @@ def cases():
         f = R.OUT / R.slug(name) / "result.json"
         if not f.is_file():
             continue
-        tun = {KNOWN.get(tuple(sorted(t["strings"]))) for p in s["tabs"] if p in by for t in by[p]["tracks"] if tabdata.is_guitar(t)}
+        tun = {KNOWN.get(tuple(sorted(p_ + (t.get("offset") or 0) for p_ in t["strings"]))) for p in s["tabs"] if p in by for t in by[p]["tracks"] if tabdata.is_guitar(t)}
         out.append((name, json.loads(f.read_text())["raw"], tun - {None}))
     return [c for c in out if len(c[2]) == 1]
 

@@ -80,7 +80,8 @@ def main():
         if name:
             shipped.tunings[name] = shipped.tunings.get(name, 0) + 1
     OUT.parent.mkdir(exist_ok=True)
-    OUT.write_text(json.dumps(shipped.to_json(), separators=(",", ":")))
+    keep = json.loads(OUT.read_text()) if OUT.is_file() else {}  # e.g. the tempo-level model
+    OUT.write_text(json.dumps({**keep, **shipped.to_json()}, separators=(",", ":")))
     print(f"wrote {OUT} ({OUT.stat().st_size // 1024} KB)")
 
 
