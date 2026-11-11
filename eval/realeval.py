@@ -205,6 +205,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only")
     ap.add_argument("--no-run", action="store_true", help="score only songs already run")
+    ap.add_argument("--rewrite", action="store_true",
+                    help="songs already run: write their tabs again from the cached transcriptions (after changing the tab-writing stage)")
     a = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -214,6 +216,11 @@ def main():
             continue
         if a.no_run and not (OUT / slug(name) / "result.json").is_file():
             continue
+        if a.rewrite:
+            done = OUT / slug(name) / "result.json"
+            if not done.is_file():
+                continue
+            done.unlink()
         try:
             res = run_pipeline(song)
             r = score(song, res)

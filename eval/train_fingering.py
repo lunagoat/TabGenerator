@@ -74,6 +74,11 @@ def main():
     print("GuitarSet: learned %.4f / Rock %.4f / comp %.4f" % guitarset_score(final))
 
     shipped = build_prior(tracks).pruned(2)
+    known = {t.strings: t.name for t in fretboard.GUITAR_TUNINGS}
+    for tr in tracks:
+        name = known.get(tr.tuning.strings)
+        if name:
+            shipped.tunings[name] = shipped.tunings.get(name, 0) + 1
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text(json.dumps(shipped.to_json(), separators=(",", ":")))
     print(f"wrote {OUT} ({OUT.stat().st_size // 1024} KB)")

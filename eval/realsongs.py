@@ -43,27 +43,28 @@ def songs() -> list[dict]:
 
 def play_order(bars) -> list[int]:
     """Bar indexes in the order they are played: repeats taken, alternate
-    endings chosen per pass (Guitar Pro's repeat rules)."""
-    order, i, start, passes = [], 0, 0, {}
-    guard = 0
-    while i < len(bars) and guard < 20 * len(bars):
-        guard += 1
-        _, _, _, _, _, close, open_, alt = (list(bars[i]) + [0])[:8]
-        if open_ and passes.get(("open", i)) is None:
+    endings chosen per pass (Guitar Pro's repeat rules). A repeat that has
+    been played out is never taken again (Guitar Pro has no nested repeats;
+    a section marked to repeat inside another one would otherwise loop)."""
+    order, i, start = [], 0, 0
+    went_back: dict[int, int] = {}  # close bar -> times it sent us back
+    finished: set[int] = set()
+    while i < len(bars) and len(order) < 8 * len(bars):
+        close, open_, alt = (list(bars[i]) + [0])[5:8]
+        if open_:
             start = i
-            passes[("open", i)] = True
-        n = passes.get(start, 0)  # how many times the repeat has gone back
+        # Which pass of the current repeat this is (for alternate endings).
+        n = max((went_back.get(j, 0) for j in range(start, len(bars)) if j not in finished), default=0)
         if alt and not (alt >> n) & 1:
             i += 1
             continue
         order.append(i)
-        if close and n < close:
-            passes[start] = n + 1
-            i = start
-            continue
-        if close:
-            passes[start] = 0
-            passes.pop(("open", start), None)
+        if close and i not in finished:
+            if went_back.get(i, 0) < close:
+                went_back[i] = went_back.get(i, 0) + 1
+                i = start
+                continue
+            finished.add(i)
         i += 1
     return order
 
