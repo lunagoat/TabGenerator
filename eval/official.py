@@ -32,7 +32,10 @@ from tabgen.transcribe import TNote
 
 OUT = env.WORK / "official"
 AUDIO = (".flac", ".dsf", ".wav", ".mp3", ".m4a", ".ogg", ".opus", ".aiff", ".ape", ".wv")
-SKIP_FLAGS = set("txhc")  # tied, dead, harmonic, grace: not a struck note at that pitch
+SKIP_FLAGS = set("txhc")
+# Official tabs cover the whole recording, so a good alignment scores far
+# higher than with the partial tabs of realeval.py.
+MIN_QUALITY = 0.5  # tied, dead, harmonic, grace: not a struck note at that pitch
 
 
 def words(s):
@@ -125,7 +128,10 @@ def tab_parts(row):
                 if kind_:
                     notes.append((seconds(tick), kind_, -1, -1))
             else:
-                notes.append((seconds(tick), strings[s - 1] + fret, order.index(s - 1), fret))
+                # offset = capo: frets count from it, so the sounding pitch
+                # and the fret on a neck without a capo are both + offset.
+                cap = tr.get("offset", 0) or 0
+                notes.append((seconds(tick), strings[s - 1] + fret + cap, order.index(s - 1), fret + cap))
     for k in out:
         out[k] = sorted(set(out[k]))
     return out, secs
@@ -216,8 +222,8 @@ def main():
                 line += f" | {part} F1 {p['f1@100']:.2f}" + (f" str {p['same_string']:.2f}" if "same_string" in p else "")
         print(line, flush=True)
     (OUT / "scores.json").write_text(json.dumps(results, indent=1))
-    good = [r for r in results if r["quality"] >= R.MIN_QUALITY]
-    print(f"\n{len(good)} of {len(results)} songs aligned (alignment score >= {R.MIN_QUALITY}). Means over those:")
+    good = [r for r in results if r["quality"] >= MIN_QUALITY]
+    print(f"\n{len(good)} of {len(results)} songs aligned (alignment score >= {MIN_QUALITY}). Means over those:")
     for part in ("guitar", "bass", "drums", "vocals", "piano", "synth"):
         ps = [r["parts"][part] for r in good if part in r["parts"]]
         if not ps:

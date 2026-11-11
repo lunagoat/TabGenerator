@@ -531,6 +531,7 @@ def fit_to_range(events: list[Event], tuning: Tuning) -> int:
 
 TUNING_RARITY = 0.2  # weight of -log(how common a tuning is) against fingering cost per note
 TUNING_MAX_EVENTS = 1500  # enough of a song to judge its tuning
+MAX_BELOW = 0.02  # share of notes allowed below a tuning's lowest string (strays)
 
 
 def choose_tuning(
@@ -565,11 +566,20 @@ def choose_tuning(
     low = robust_lowest(credible_low_pitches(events))
     if low is None:
         return table[0]
-    fits = [t for t in table if t.lowest <= low]
-    if not fits:
-        return min(table, key=lambda t: t.lowest)
     prior = (weights.prior if weights and weights.prior else None) or default_prior()
     counts = prior.tunings if prior and not bass else {}
+    fits = [t for t in table if t.lowest <= low]
+    if counts:
+        # A transcription has strays: bass bleeding into the guitar, octave
+        # errors. A tuning stays in the running when only a few notes fall
+        # below its lowest string; the fingering cost charges for each one
+        # (it can't be placed), so a tuning that really needs them still wins.
+        credible = credible_low_pitches(events)
+        for t in table:
+            if t not in fits and credible and sum(p < t.lowest for p in credible) <= MAX_BELOW * len(credible):
+                fits.append(t)
+    if not fits:
+        return min(table, key=lambda t: t.lowest)
     if not counts:
         # No statistics (bass, or no prior file): the closest tunings only,
         # with hand-set priors.
